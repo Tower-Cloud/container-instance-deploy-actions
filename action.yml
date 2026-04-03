@@ -48,7 +48,7 @@ runs:
       shell: bash
       run: ${{ github.action_path }}/dist/tci-deploy
       env:
-        TOWER_API_URL: ${{ vars.TOWER_API_URL }}
+        TOWER_API_URL: 'https://api.dev.tower.cloud'
         INPUT_APP_SOURCE_PATH: ${{ github.workspace }}
         INPUT_DOCKERFILE_PATH: ${{ inputs.dockerfilePath }}
         INPUT_TOWER_USER: ${{ inputs.tower_user }}
