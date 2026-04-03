@@ -55,29 +55,31 @@ func (c *Client) Login(username, password, orgID string) (string, error) {
 		return "", fmt.Errorf("failed to read login response: %w", err)
 	}
 
+	// Non-200 responses return {error: {message, code}} format.
 	if resp.StatusCode != http.StatusOK {
+		var apiErr APIError
+		if err := json.Unmarshal(respBody, &apiErr); err == nil && apiErr.Error.Message != "" {
+			return "", fmt.Errorf("login failed (%s): %s", apiErr.Error.Code, apiErr.Error.Message)
+		}
 		return "", fmt.Errorf("login failed with status %d: %s", resp.StatusCode, string(respBody))
 	}
 
+	// Success returns {access_token, expires_in, token_type} directly.
 	var loginResp LoginResponse
 	if err := json.Unmarshal(respBody, &loginResp); err != nil {
 		return "", fmt.Errorf("failed to parse login response: %w", err)
 	}
 
-	if !loginResp.Success {
-		return "", fmt.Errorf("login failed: %s - %s", loginResp.Error, loginResp.Message)
+	if loginResp.AccessToken == "" {
+		return "", fmt.Errorf("login succeeded but no access token returned (response: %s)", string(respBody))
 	}
 
-	if loginResp.Data.AccessToken == "" {
-		return "", fmt.Errorf("login succeeded but no access token returned")
-	}
-
-	return loginResp.Data.AccessToken, nil
+	return loginResp.AccessToken, nil
 }
 
 // GetContainer checks if a container instance exists and returns its details.
-func (c *Client) GetContainer(token, orgID, tciName string) (*ContainerResponse, error) {
-	url := fmt.Sprintf("%s/service/container-instance/%s", c.apiURL, tciName)
+func (c *Client) GetContainer(token, orgID, containerName string) (*ContainerResponse, error) {
+	url := fmt.Sprintf("%s/service/container-instance/%s", c.apiURL, containerName)
 
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
@@ -105,7 +107,7 @@ func (c *Client) GetContainer(token, orgID, tciName string) (*ContainerResponse,
 				"  1. Go to https://console.tower.cloud\n"+
 				"  2. Navigate to Container Instances > Create Instance\n"+
 				"  3. Use the instance name as the 'container_name' input in your workflow",
-			tciName,
+			containerName,
 		)
 	}
 
@@ -119,19 +121,21 @@ func (c *Client) GetContainer(token, orgID, tciName string) (*ContainerResponse,
 	}
 
 	if !containerResp.Success {
-		return nil, fmt.Errorf("failed to get container instance: %s - %s", containerResp.Error, containerResp.Message)
+		return nil, fmt.Errorf("failed to get container instance: %s", containerResp.Error)
 	}
 
 	return &containerResp, nil
 }
 
-// UpdateContainer updates an existing container instance with a new image tag.
-func (c *Client) UpdateContainer(token, orgID, tciName, imageTag string) (string, error) {
-	url := fmt.Sprintf("%s/service/container-instance/%s", c.apiURL, tciName)
+// UpdateContainer updates an existing container instance with a new image.
+// Uses registryType "tower" with towerImage field for Tower registry images.
+func (c *Client) UpdateContainer(token, orgID, containerName, fullImageURL string) (string, error) {
+	url := fmt.Sprintf("%s/service/container-instance/%s", c.apiURL, containerName)
 
 	payload := UpdateContainerRequest{
-		ContainerSpec: ContainerSpec{
-			ImageTag: imageTag,
+		ContainerSpec: UpdateContainerSpec{
+			RegistryType: "tower",
+			TowerImage:   fullImageURL,
 		},
 	}
 
@@ -169,7 +173,7 @@ func (c *Client) UpdateContainer(token, orgID, tciName, imageTag string) (string
 	}
 
 	if !updateResp.Success {
-		return "", fmt.Errorf("update container failed: %s - %s", updateResp.Error, updateResp.Message)
+		return "", fmt.Errorf("update container failed: %s", updateResp.Error)
 	}
 
 	return updateResp.Data.TaskID, nil

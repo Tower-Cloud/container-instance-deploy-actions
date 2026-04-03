@@ -57,7 +57,7 @@ func run() error {
 		return err
 	}
 
-	status := containerResp.Data.Status
+	status := containerResp.Data.Container.Status
 	fmt.Printf("Container instance '%s' found (status: %s)\n", cfg.ContainerName, status)
 
 	switch status {
@@ -72,7 +72,7 @@ func run() error {
 			"container instance '%s' is in 'failed' state (reason: %s)\n\n"+
 				"Resolve the issue in the Tower Cloud portal before attempting to deploy.\n"+
 				"You may need to delete and recreate the container instance",
-			cfg.ContainerName, containerResp.Data.StatusReason,
+			cfg.ContainerName, containerResp.Data.Container.StatusReason,
 		)
 	}
 
