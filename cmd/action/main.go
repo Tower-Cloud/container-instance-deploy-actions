@@ -27,9 +27,15 @@ func run() error {
 	mask(cfg.TowerPassword)
 	mask(cfg.RegistryPassword)
 
-	// Image URL: {registry_url}/{github_repo}/{container_name}:{github_sha}
-	// e.g., my-registry.hyd.cr.tower.cloud/my-cool-app/my-container:abc123
-	fullImageURL := fmt.Sprintf("%s/%s/%s:%s", cfg.RegistryURL, cfg.RepoName, cfg.ContainerName, cfg.GitHubSHA)
+	// Image URL: {registry_url}/{github_repo}/{container_name}:{short_sha}
+	// e.g., my-registry.hyd.cr.tower.cloud/my-cool-app/my-container:a1b2c3d
+	// Docker tags must be lowercase, short SHA (7 chars) for readability.
+	repoName := strings.ToLower(cfg.RepoName)
+	shortSHA := cfg.GitHubSHA
+	if len(shortSHA) > 7 {
+		shortSHA = shortSHA[:7]
+	}
+	fullImageURL := fmt.Sprintf("%s/%s/%s:%s", cfg.RegistryURL, repoName, cfg.ContainerName, shortSHA)
 
 	// ── Step 1: Login to Tower Cloud ──
 	group("Login to Tower Cloud")
