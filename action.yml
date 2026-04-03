@@ -1,0 +1,65 @@
+name: 'Tower Cloud Container Deploy'
+description: 'Build, push, and deploy a container image to Tower Cloud Container Instance'
+
+inputs:
+  dockerfilePath:
+    description: 'Dockerfile path relative to appSourcePath'
+    required: false
+    default: 'Dockerfile'
+  tower_user:
+    description: 'Tower Cloud username'
+    required: true
+  tower_password:
+    description: 'Tower Cloud password'
+    required: true
+  organization_id:
+    description: 'Tower Cloud organization ID'
+    required: true
+  container_name:
+    description: 'Name of the existing container instance to update'
+    required: true
+  registry_url:
+    description: 'Container registry URL (e.g., my-registry.hyd.cr.tower.cloud)'
+    required: true
+  registry_username:
+    description: 'Registry username for docker login'
+    required: true
+  registry_password:
+    description: 'Registry password for docker login'
+    required: true
+  buildArguments:
+    description: 'Docker build arguments (key=value per line)'
+    required: false
+    default: ''
+
+outputs:
+  taskId:
+    description: 'Deployment task ID returned by Tower Cloud'
+    value: ${{ steps.run.outputs.taskId }}
+  imageUrl:
+    description: 'Full image URL that was built and pushed'
+    value: ${{ steps.run.outputs.imageUrl }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Deploy to Tower Cloud
+      id: run
+      shell: bash
+      run: ${{ github.action_path }}/dist/tci-deploy
+      env:
+        TOWER_API_URL: ${{ vars.TOWER_API_URL }}
+        INPUT_APP_SOURCE_PATH: ${{ github.workspace }}
+        INPUT_DOCKERFILE_PATH: ${{ inputs.dockerfilePath }}
+        INPUT_TOWER_USER: ${{ inputs.tower_user }}
+        INPUT_TOWER_PASSWORD: ${{ inputs.tower_password }}
+        INPUT_ORGANIZATION_ID: ${{ inputs.organization_id }}
+        INPUT_CONTAINER_NAME: ${{ inputs.container_name }}
+        INPUT_REGISTRY_URL: ${{ inputs.registry_url }}
+        INPUT_REGISTRY_USERNAME: ${{ inputs.registry_username }}
+        INPUT_REGISTRY_PASSWORD: ${{ inputs.registry_password }}
+        INPUT_BUILD_ARGUMENTS: ${{ inputs.buildArguments }}
+
+branding:
+  icon: 'cloud'
+  color: 'blue'
