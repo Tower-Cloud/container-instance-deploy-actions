@@ -3,7 +3,7 @@ description: 'Build, push, and deploy a container image to Tower Cloud Container
 
 inputs:
   dockerfilePath:
-    description: 'Dockerfile path relative to appSourcePath'
+    description: 'Dockerfile path relative to project root'
     required: false
     default: 'Dockerfile'
   tower_user:
@@ -18,15 +18,31 @@ inputs:
   container_name:
     description: 'Name of the existing container instance to update'
     required: true
+
+  # Tower Registry (provide tcr_name — credentials fetched automatically)
+  tcr_name:
+    description: 'Tower Container Registry name (auto-fetches URL and credentials)'
+    required: false
+    default: ''
+
+  # External Registry (provide all three for public/private registries)
+  registry_type:
+    description: 'External registry type: public or private (only needed for non-Tower registries)'
+    required: false
+    default: 'private'
   registry_url:
-    description: 'Container registry URL (e.g., my-registry.hyd.cr.tower.cloud)'
-    required: true
+    description: 'External registry hostname (e.g., docker.io, ghcr.io)'
+    required: false
+    default: ''
   registry_username:
-    description: 'Registry username for docker login'
-    required: true
+    description: 'External registry username for docker login'
+    required: false
+    default: ''
   registry_password:
-    description: 'Registry password for docker login'
-    required: true
+    description: 'External registry password for docker login'
+    required: false
+    default: ''
+
   buildArguments:
     description: 'Docker build arguments (key=value per line)'
     required: false
@@ -55,6 +71,8 @@ runs:
         INPUT_TOWER_PASSWORD: ${{ inputs.tower_password }}
         INPUT_ORGANIZATION_ID: ${{ inputs.organization_id }}
         INPUT_CONTAINER_NAME: ${{ inputs.container_name }}
+        INPUT_TCR_NAME: ${{ inputs.tcr_name }}
+        INPUT_REGISTRY_TYPE: ${{ inputs.registry_type }}
         INPUT_REGISTRY_URL: ${{ inputs.registry_url }}
         INPUT_REGISTRY_USERNAME: ${{ inputs.registry_username }}
         INPUT_REGISTRY_PASSWORD: ${{ inputs.registry_password }}

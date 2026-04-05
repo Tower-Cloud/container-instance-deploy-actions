@@ -55,7 +55,6 @@ func (c *Client) Login(username, password, orgID string) (string, error) {
 		return "", fmt.Errorf("failed to read login response: %w", err)
 	}
 
-	// Non-200 responses return {error: {message, code}} format.
 	if resp.StatusCode != http.StatusOK {
 		var apiErr APIError
 		if err := json.Unmarshal(respBody, &apiErr); err == nil && apiErr.Error.Message != "" {
@@ -64,7 +63,6 @@ func (c *Client) Login(username, password, orgID string) (string, error) {
 		return "", fmt.Errorf("login failed with status %d: %s", resp.StatusCode, string(respBody))
 	}
 
-	// Success returns {access_token, expires_in, token_type} directly.
 	var loginResp LoginResponse
 	if err := json.Unmarshal(respBody, &loginResp); err != nil {
 		return "", fmt.Errorf("failed to parse login response: %w", err)
@@ -104,7 +102,7 @@ func (c *Client) GetContainer(token, orgID, containerName string) (*ContainerRes
 			"container instance '%s' not found\n\n"+
 				"This action only updates existing container instances — it does not create new ones.\n"+
 				"Please create the container instance first via the Tower Cloud portal:\n"+
-				"  1. Go to https://console.tower.cloud\n"+
+				"  1. Go to https://portal.dev.tower.cloud\n"+
 				"  2. Navigate to Container Instances > Create Instance\n"+
 				"  3. Use the instance name as the 'container_name' input in your workflow",
 			containerName,
@@ -127,17 +125,81 @@ func (c *Client) GetContainer(token, orgID, containerName string) (*ContainerRes
 	return &containerResp, nil
 }
 
+// GetRegistryCredentials fetches Tower registry credentials from the API gateway.
+func (c *Client) GetRegistryCredentials(token, orgID, tcrName string) (registryURL, username, password string, err error) {
+	url := fmt.Sprintf("%s/service/container-registry/credentials/%s", c.apiURL, tcrName)
+
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return "", "", "", fmt.Errorf("failed to create registry credentials request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("X-Organization-ID", orgID)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", "", "", fmt.Errorf("registry credentials request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", "", "", fmt.Errorf("failed to read registry credentials response: %w", err)
+	}
+
+	if resp.StatusCode == http.StatusNotFound {
+		return "", "", "", fmt.Errorf(
+			"tower registry '%s' not found\n\n"+
+				"Please create the container registry first via the Tower Cloud portal:\n"+
+				"  1. Go to https://portal.dev.tower.cloud\n"+
+				"  2. Navigate to Container Registries > Create Registry\n"+
+				"  3. Use the registry name as the 'tcr_name' input",
+			tcrName,
+		)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return "", "", "", fmt.Errorf("failed to get registry credentials (status %d): %s", resp.StatusCode, string(respBody))
+	}
+
+	var credsResp RegistryCredentialsResponse
+	if err := json.Unmarshal(respBody, &credsResp); err != nil {
+		return "", "", "", fmt.Errorf("failed to parse registry credentials response: %w", err)
+	}
+
+	if !credsResp.Success {
+		return "", "", "", fmt.Errorf("failed to get registry credentials: %s - %s", credsResp.Error, credsResp.Message)
+	}
+
+	return credsResp.Data.RegistryURL, credsResp.Data.Username, credsResp.Data.Password, nil
+}
+
 // UpdateContainer updates an existing container instance with a new image.
-// Uses registryType "tower" with towerImage field for Tower registry images.
-func (c *Client) UpdateContainer(token, orgID, containerName, fullImageURL string) (string, error) {
+// Builds the correct API payload based on the registry config type.
+func (c *Client) UpdateContainer(token, orgID, containerName string, regCfg RegistryConfig) (string, error) {
 	url := fmt.Sprintf("%s/service/container-instance/%s", c.apiURL, containerName)
 
-	payload := UpdateContainerRequest{
-		ContainerSpec: UpdateContainerSpec{
-			RegistryType: "tower",
-			TowerImage:   fullImageURL,
-		},
+	spec := UpdateContainerSpec{
+		RegistryType: regCfg.Type,
 	}
+
+	switch regCfg.Type {
+	case "tower":
+		spec.TowerImage = regCfg.FullImage
+	case "public":
+		spec.Registry = regCfg.RegistryURL
+		spec.ImageTag = regCfg.ImageTag
+	case "private":
+		spec.Registry = regCfg.RegistryURL
+		spec.ImageTag = regCfg.ImageTag
+		spec.RegistryCredentials = &RegistryCredentials{
+			Username: regCfg.Username,
+			Password: regCfg.Password,
+			Label:    regCfg.ContainerName + "-registry-secret",
+		}
+	}
+
+	payload := UpdateContainerRequest{ContainerSpec: spec}
 
 	body, err := json.Marshal(payload)
 	if err != nil {
