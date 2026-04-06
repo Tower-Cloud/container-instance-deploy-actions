@@ -29,7 +29,7 @@ jobs:
           tower_password: ${{ secrets.TOWER_PASSWORD }}
           organization_id: ${{ secrets.TOWER_ORG_ID }}
           container_name: my-app
-          tcr_name: my-registry
+          tcr_name: ${{ secrets.TCR_NAME }}
 ```
 
 ### Public Registry
@@ -62,6 +62,72 @@ jobs:
           registry_url: ${{ secrets.REGISTRY_URL }}
           registry_username: ${{ secrets.REGISTRY_USERNAME }}
           registry_password: ${{ secrets.REGISTRY_PASSWORD }}
+```
+
+### Custom Dockerfile Path
+
+If your Dockerfile is not in the project root:
+
+```yaml
+      - name: Build and deploy
+        uses: tower-cloud/container-instance-deploy-actions@main
+        with:
+          tower_user: ${{ secrets.TOWER_USER }}
+          tower_password: ${{ secrets.TOWER_PASSWORD }}
+          organization_id: ${{ secrets.TOWER_ORG_ID }}
+          container_name: my-app
+          tcr_name: ${{ secrets.TCR_NAME }}
+          dockerfilePath: docker/Dockerfile.prod
+```
+
+### Build Arguments
+
+Pass Docker build arguments as multiline key=value pairs:
+
+```yaml
+      - name: Build and deploy
+        uses: tower-cloud/container-instance-deploy-actions@main
+        with:
+          tower_user: ${{ secrets.TOWER_USER }}
+          tower_password: ${{ secrets.TOWER_PASSWORD }}
+          organization_id: ${{ secrets.TOWER_ORG_ID }}
+          container_name: my-app
+          tcr_name: ${{ secrets.TCR_NAME }}
+          buildArguments: |
+            NODE_ENV=production
+            API_URL=https://api.example.com
+            BUILD_VERSION=${{ github.sha }}
+```
+
+### Using Outputs
+
+Access the deployment task ID and image URL in subsequent steps:
+
+```yaml
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and deploy
+        id: deploy
+        uses: tower-cloud/container-instance-deploy-actions@main
+        with:
+          tower_user: ${{ secrets.TOWER_USER }}
+          tower_password: ${{ secrets.TOWER_PASSWORD }}
+          organization_id: ${{ secrets.TOWER_ORG_ID }}
+          container_name: my-app
+          tcr_name: ${{ secrets.TCR_NAME }}
+
+      - name: Print deployment info
+        run: |
+          echo "Task ID: ${{ steps.deploy.outputs.taskId }}"
+          echo "Image:   ${{ steps.deploy.outputs.imageUrl }}"
+
+      - name: Notify on success
+        if: success()
+        run: echo "Deployed ${{ steps.deploy.outputs.imageUrl }} successfully"
 ```
 
 ## How It Works
