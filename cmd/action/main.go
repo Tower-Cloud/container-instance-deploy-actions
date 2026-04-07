@@ -114,21 +114,41 @@ func run() error {
 			ContainerName: cfg.ContainerName,
 		}
 	} else {
-		// External registry — user provided credentials.
+		// External registry.
 		registryURL = cfg.RegistryURL
 		regUser = cfg.RegistryUsername
 		regPass = cfg.RegistryPassword
 
+		// Auto-detect Tower registry URL — use IAM credentials if no registry creds provided.
+		isTowerURL := strings.Contains(registryURL, "tower.cloud")
+		if isTowerURL && regUser == "" && regPass == "" {
+			fmt.Println("Tower registry URL detected — using IAM credentials for registry authentication.")
+			regUser = cfg.TowerUser
+			regPass = cfg.TowerPassword
+			cfg.RegistryType = "tower"
+		}
+
 		// imageTag for API: repo/container:sha (without registry host)
 		imageTag := fmt.Sprintf("%s/%s:%s", repoName, containerName, shortSHA)
 
-		regCfg = tower.RegistryConfig{
-			Type:          cfg.RegistryType,
-			RegistryURL:   registryURL,
-			ImageTag:      imageTag,
-			Username:      regUser,
-			Password:      regPass,
-			ContainerName: cfg.ContainerName,
+		if cfg.RegistryType == "tower" {
+			// Tower URL without tcr_name — treat as tower type.
+			fullImg := fmt.Sprintf("%s/%s/%s:%s", registryURL, repoName, containerName, shortSHA)
+			regCfg = tower.RegistryConfig{
+				Type:          "tower",
+				RegistryURL:   registryURL,
+				FullImage:     fullImg,
+				ContainerName: cfg.ContainerName,
+			}
+		} else {
+			regCfg = tower.RegistryConfig{
+				Type:          cfg.RegistryType,
+				RegistryURL:   registryURL,
+				ImageTag:      imageTag,
+				Username:      regUser,
+				Password:      regPass,
+				ContainerName: cfg.ContainerName,
+			}
 		}
 	}
 
@@ -141,12 +161,16 @@ func run() error {
 	fmt.Printf("Image: %s\n", fullImageURL)
 
 	// ── Step 4: Docker Login ──
-	group("Docker login")
-	if err := docker.Login(registryURL, regUser, regPass); err != nil {
-		return err
+	if regUser != "" && regPass != "" {
+		group("Docker login")
+		if err := docker.Login(registryURL, regUser, regPass); err != nil {
+			return err
+		}
+		fmt.Printf("Logged into %s\n", registryURL)
+		endGroup()
+	} else {
+		fmt.Printf("Skipping docker login — public registry '%s' (no credentials needed)\n", registryURL)
 	}
-	fmt.Printf("Logged into %s\n", registryURL)
-	endGroup()
 
 	// ── Step 5: Build Image (linux/amd64) ──
 	group("Build container image")
@@ -293,26 +317,30 @@ func validateConfig(cfg config) error {
 	isTower := cfg.TCRName != ""
 
 	if !isTower {
-		// External registry — need URL + creds.
-		var extMissing []string
+		// External registry — need URL at minimum.
 		if cfg.RegistryURL == "" {
-			extMissing = append(extMissing, "registry_url")
-		}
-		if cfg.RegistryUsername == "" {
-			extMissing = append(extMissing, "registry_username")
-		}
-		if cfg.RegistryPassword == "" {
-			extMissing = append(extMissing, "registry_password")
-		}
-		if len(extMissing) > 0 {
 			return fmt.Errorf(
-				"missing required inputs for external registry: %s\n\n"+
+				"missing required input: registry_url\n\n"+
 					"For external registries (Docker Hub, GHCR, etc.), provide:\n"+
-					"  - registry_url, registry_username, registry_password\n\n"+
+					"  - registry_url (always required)\n"+
+					"  - registry_username, registry_password (required for private registries)\n\n"+
 					"For Tower registries, provide:\n"+
 					"  - tcr_name (credentials are fetched automatically)",
-				strings.Join(extMissing, ", "),
 			)
+		}
+
+		// Private registry requires credentials.
+		if cfg.RegistryType == "private" && (cfg.RegistryUsername == "" || cfg.RegistryPassword == "") {
+			// Check if it's a Tower URL — IAM creds will be used automatically.
+			if !strings.Contains(cfg.RegistryURL, "tower.cloud") {
+				return fmt.Errorf(
+					"missing registry credentials for private registry\n\n"+
+						"For private registries, provide:\n"+
+						"  - registry_username, registry_password\n\n"+
+						"For public registries, set registry_type to 'public'\n"+
+						"For Tower registries, provide tcr_name or use a .tower.cloud registry URL",
+				)
+			}
 		}
 
 		// Validate registry_type.
