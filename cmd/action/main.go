@@ -36,6 +36,7 @@ func run() error {
 	if len(shortSHA) > 7 {
 		shortSHA = shortSHA[:7]
 	}
+	repoOwner := strings.ToLower(cfg.RepoOwner)
 	repoName := strings.ToLower(cfg.RepoName)
 	containerName := strings.ToLower(cfg.ContainerName)
 
@@ -128,11 +129,14 @@ func run() error {
 			cfg.RegistryType = "tower"
 		}
 
-		// imageTag for API: repo/container:sha (without registry host)
-		imageTag := fmt.Sprintf("%s/%s:%s", repoName, containerName, shortSHA)
+		// External registries (GHCR, ECR, etc.) need owner in the path:
+		//   ghcr.io/{owner}/{repo}/{container}:{sha}
+		// imageTag for API: owner/repo/container:sha (without registry host)
+		imageTag := fmt.Sprintf("%s/%s/%s:%s", repoOwner, repoName, containerName, shortSHA)
 
 		if cfg.RegistryType == "tower" {
-			// Tower URL without tcr_name — treat as tower type.
+			// Tower URL without tcr_name — use repo-level path (no owner needed).
+			imageTag = fmt.Sprintf("%s/%s:%s", repoName, containerName, shortSHA)
 			fullImg := fmt.Sprintf("%s/%s/%s:%s", registryURL, repoName, containerName, shortSHA)
 			regCfg = tower.RegistryConfig{
 				Type:          "tower",
@@ -152,10 +156,17 @@ func run() error {
 		}
 	}
 
-	// Full docker tag: {registry_url}/{repo}/{container}:{sha}
-	fullImageURL := fmt.Sprintf("%s/%s/%s:%s", registryURL, repoName, containerName, shortSHA)
+	// Full docker tag
+	var fullImageURL string
 	if isTower {
+		// Tower with tcr_name: {registry}/{repo}/{container}:{sha}
 		fullImageURL = regCfg.FullImage
+	} else if cfg.RegistryType == "tower" {
+		// Tower URL without tcr_name: {registry}/{repo}/{container}:{sha}
+		fullImageURL = fmt.Sprintf("%s/%s/%s:%s", registryURL, repoName, containerName, shortSHA)
+	} else {
+		// External registry: {registry}/{owner}/{repo}/{container}:{sha}
+		fullImageURL = fmt.Sprintf("%s/%s/%s/%s:%s", registryURL, repoOwner, repoName, containerName, shortSHA)
 	}
 
 	fmt.Printf("Image: %s\n", fullImageURL)
@@ -234,15 +245,18 @@ type config struct {
 	RegistryUsername  string // External registry username
 	RegistryPassword string // External registry password
 	BuildArguments   string
-	RepoName         string
+	RepoOwner        string // GitHub repository owner (e.g., vinayteja-31)
+	RepoName         string // GitHub repository name (e.g., sample-workflow)
 	GitHubSHA        string
 }
 
 func readConfig() config {
+	repoOwner := ""
 	repoName := ""
 	if fullRepo := os.Getenv("GITHUB_REPOSITORY"); fullRepo != "" {
 		parts := strings.SplitN(fullRepo, "/", 2)
 		if len(parts) == 2 {
+			repoOwner = parts[0]
 			repoName = parts[1]
 		}
 	}
@@ -260,6 +274,7 @@ func readConfig() config {
 		RegistryUsername:  os.Getenv("INPUT_REGISTRY_USERNAME"),
 		RegistryPassword: os.Getenv("INPUT_REGISTRY_PASSWORD"),
 		BuildArguments:   os.Getenv("INPUT_BUILD_ARGUMENTS"),
+		RepoOwner:        repoOwner,
 		RepoName:         repoName,
 		GitHubSHA:        os.Getenv("GITHUB_SHA"),
 	}
@@ -352,7 +367,7 @@ func validateConfig(cfg config) error {
 		}
 	}
 
-	if cfg.RepoName == "" {
+	if cfg.RepoOwner == "" || cfg.RepoName == "" {
 		return fmt.Errorf("GITHUB_REPOSITORY is not set — this action must run within a GitHub Actions workflow")
 	}
 
