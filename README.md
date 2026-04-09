@@ -32,7 +32,9 @@ jobs:
           tcr_name: ${{ secrets.TCR_NAME }}
 ```
 
-### Public Registry
+### External Registry (Docker Hub, GHCR, ACR, GCR, ECR, etc.)
+
+Provide registry URL and credentials. Works for both public and private registries — credentials are always needed for push.
 
 ```yaml
       - name: Build and deploy
@@ -42,23 +44,6 @@ jobs:
           tower_password: ${{ secrets.TOWER_PASSWORD }}
           organization_id: ${{ secrets.TOWER_ORG_ID }}
           container_name: my-app
-          registry_type: public
-          registry_url: ${{ secrets.REGISTRY_URL }}
-          registry_username: ${{ secrets.REGISTRY_USERNAME }}
-          registry_password: ${{ secrets.REGISTRY_PASSWORD }}
-```
-
-### Private Registry
-
-```yaml
-      - name: Build and deploy
-        uses: tower-cloud/container-instance-deploy-actions@main
-        with:
-          tower_user: ${{ secrets.TOWER_USER }}
-          tower_password: ${{ secrets.TOWER_PASSWORD }}
-          organization_id: ${{ secrets.TOWER_ORG_ID }}
-          container_name: my-app
-          registry_type: private
           registry_url: ${{ secrets.REGISTRY_URL }}
           registry_username: ${{ secrets.REGISTRY_USERNAME }}
           registry_password: ${{ secrets.REGISTRY_PASSWORD }}
@@ -158,11 +143,10 @@ jobs:
 |-------|----------|-------------|
 | `tcr_name` | Yes | Tower Container Registry name (credentials fetched automatically) |
 
-### External Registry (Public / Private)
+### External Registry (Docker Hub, GHCR, ACR, GCR, ECR, etc.)
 
 | Input | Required | Description |
 |-------|----------|-------------|
-| `registry_type` | No | `public` or `private` (default: `private`) |
 | `registry_url` | Yes | Registry hostname (e.g., `docker.io`, `ghcr.io`) — **no `https://`** |
 | `registry_username` | Yes | Registry username |
 | `registry_password` | Yes | Registry password or access token |

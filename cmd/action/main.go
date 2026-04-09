@@ -123,7 +123,7 @@ func run() error {
 		imageTag := fmt.Sprintf("%s/%s:%s", repoName, containerName, shortSHA)
 
 		regCfg = tower.RegistryConfig{
-			Type:          cfg.RegistryType,
+			Type:          "private",
 			RegistryURL:   registryURL,
 			ImageTag:      imageTag,
 			Username:      regUser,
@@ -205,7 +205,6 @@ type config struct {
 	OrganizationID   string
 	ContainerName    string
 	TCRName          string // Tower registry name (if tower)
-	RegistryType     string // "public" or "private" (if external)
 	RegistryURL      string // External registry URL
 	RegistryUsername  string // External registry username
 	RegistryPassword string // External registry password
@@ -231,7 +230,6 @@ func readConfig() config {
 		OrganizationID:   os.Getenv("INPUT_ORGANIZATION_ID"),
 		ContainerName:    os.Getenv("INPUT_CONTAINER_NAME"),
 		TCRName:          os.Getenv("INPUT_TCR_NAME"),
-		RegistryType:     envOrDefault("INPUT_REGISTRY_TYPE", "private"),
 		RegistryURL:      os.Getenv("INPUT_REGISTRY_URL"),
 		RegistryUsername:  os.Getenv("INPUT_REGISTRY_USERNAME"),
 		RegistryPassword: os.Getenv("INPUT_REGISTRY_PASSWORD"),
@@ -307,19 +305,11 @@ func validateConfig(cfg config) error {
 		if len(extMissing) > 0 {
 			return fmt.Errorf(
 				"missing required inputs for external registry: %s\n\n"+
-					"For external registries (Docker Hub, GHCR, etc.), provide:\n"+
+					"For external registries (Docker Hub, GHCR, ACR, GCR, etc.), provide:\n"+
 					"  - registry_url, registry_username, registry_password\n\n"+
 					"For Tower registries, provide:\n"+
 					"  - tcr_name (credentials are fetched automatically)",
 				strings.Join(extMissing, ", "),
-			)
-		}
-
-		// Validate registry_type.
-		if cfg.RegistryType != "public" && cfg.RegistryType != "private" {
-			return fmt.Errorf(
-				"invalid registry_type '%s' — must be 'public' or 'private'",
-				cfg.RegistryType,
 			)
 		}
 	}
