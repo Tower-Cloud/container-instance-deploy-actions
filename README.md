@@ -4,6 +4,7 @@ Build, push, and deploy a container image to Tower Cloud — in a single step.
 
 Works with **Tower registries**, **Docker Hub**, **GHCR**, **GCR**, **ECR**, or any Docker-compatible registry.
 
+
 ## Usage
 
 ### Tower Registry
@@ -15,6 +16,7 @@ name: Deploy to Tower Cloud
 on:
   push:
     branches: [main]
+  workflow_dispatch:
 
 jobs:
   deploy:
@@ -27,12 +29,14 @@ jobs:
         with:
           tower_user: ${{ secrets.TOWER_USER }}
           tower_password: ${{ secrets.TOWER_PASSWORD }}
-          organization_id: ${{ secrets.TOWER_ORG_ID }}
+          organization_id: ${{ vars.TOWER_ORG_ID }}
           container_name: my-app
-          tcr_name: ${{ secrets.TCR_NAME }}
+          tcr_name: ${{ vars.TCR_NAME }}
 ```
 
-### Public Registry
+### External Registry (Docker Hub, GHCR, ECR, etc.)
+
+Provide the registry URL and credentials. Credentials are required because the action runs `docker login` before pushing.
 
 ```yaml
       - name: Build and deploy
@@ -40,26 +44,9 @@ jobs:
         with:
           tower_user: ${{ secrets.TOWER_USER }}
           tower_password: ${{ secrets.TOWER_PASSWORD }}
-          organization_id: ${{ secrets.TOWER_ORG_ID }}
+          organization_id: ${{ vars.TOWER_ORG_ID }}
           container_name: my-app
-          registry_type: public
-          registry_url: ${{ secrets.REGISTRY_URL }}
-          registry_username: ${{ secrets.REGISTRY_USERNAME }}
-          registry_password: ${{ secrets.REGISTRY_PASSWORD }}
-```
-
-### Private Registry
-
-```yaml
-      - name: Build and deploy
-        uses: tower-cloud/container-instance-deploy-actions@main
-        with:
-          tower_user: ${{ secrets.TOWER_USER }}
-          tower_password: ${{ secrets.TOWER_PASSWORD }}
-          organization_id: ${{ secrets.TOWER_ORG_ID }}
-          container_name: my-app
-          registry_type: private
-          registry_url: ${{ secrets.REGISTRY_URL }}
+          registry_url: ${{ vars.REGISTRY_URL }}
           registry_username: ${{ secrets.REGISTRY_USERNAME }}
           registry_password: ${{ secrets.REGISTRY_PASSWORD }}
 ```
@@ -74,9 +61,9 @@ If your Dockerfile is not in the project root:
         with:
           tower_user: ${{ secrets.TOWER_USER }}
           tower_password: ${{ secrets.TOWER_PASSWORD }}
-          organization_id: ${{ secrets.TOWER_ORG_ID }}
+          organization_id: ${{ vars.TOWER_ORG_ID }}
           container_name: my-app
-          tcr_name: ${{ secrets.TCR_NAME }}
+          tcr_name: ${{ vars.TCR_NAME }}
           dockerfilePath: docker/Dockerfile.prod
 ```
 
@@ -90,9 +77,9 @@ Pass Docker build arguments as multiline key=value pairs:
         with:
           tower_user: ${{ secrets.TOWER_USER }}
           tower_password: ${{ secrets.TOWER_PASSWORD }}
-          organization_id: ${{ secrets.TOWER_ORG_ID }}
+          organization_id: ${{ vars.TOWER_ORG_ID }}
           container_name: my-app
-          tcr_name: ${{ secrets.TCR_NAME }}
+          tcr_name: ${{ vars.TCR_NAME }}
           buildArguments: |
             NODE_ENV=production
             API_URL=https://api.example.com
@@ -116,9 +103,9 @@ jobs:
         with:
           tower_user: ${{ secrets.TOWER_USER }}
           tower_password: ${{ secrets.TOWER_PASSWORD }}
-          organization_id: ${{ secrets.TOWER_ORG_ID }}
+          organization_id: ${{ vars.TOWER_ORG_ID }}
           container_name: my-app
-          tcr_name: ${{ secrets.TCR_NAME }}
+          tcr_name: ${{ vars.TCR_NAME }}
 
       - name: Print deployment info
         run: |
@@ -158,11 +145,10 @@ jobs:
 |-------|----------|-------------|
 | `tcr_name` | Yes | Tower Container Registry name (credentials fetched automatically) |
 
-### External Registry (Public / Private)
+### External Registry (Docker Hub, GHCR, ECR, etc.)
 
 | Input | Required | Description |
 |-------|----------|-------------|
-| `registry_type` | No | `public` or `private` (default: `private`) |
 | `registry_url` | Yes | Registry hostname (e.g., `docker.io`, `ghcr.io`) — **no `https://`** |
 | `registry_username` | Yes | Registry username |
 | `registry_password` | Yes | Registry password or access token |
@@ -197,7 +183,16 @@ Example: `my-registry.hyd.cr.tower.cloud/web-portal/my-app:a1b2c3d`
 2. **Container instance** — create via Tower Cloud portal (this action only updates, never creates)
 3. **Container registry** — either a Tower registry or any external Docker-compatible registry
 4. **Dockerfile** in your repository
-5. **GitHub secrets** configured in your app repo
+5. **GitHub secrets and variables** configured in your app repo:
+   - **Secrets** (Settings → Secrets and variables → Actions → Secrets):
+     - `TOWER_USER` — Tower Cloud username
+     - `TOWER_PASSWORD` — Tower Cloud password
+     - `REGISTRY_USERNAME` — External registry username (only for external registries)
+     - `REGISTRY_PASSWORD` — External registry password / access token (only for external registries)
+   - **Variables** (Settings → Secrets and variables → Actions → Variables):
+     - `TOWER_ORG_ID` — Tower Cloud organization ID
+     - `TCR_NAME` — Tower Container Registry name (only for Tower registries)
+     - `REGISTRY_URL` — External registry hostname (only for external registries, e.g., `docker.io`, `ghcr.io`)
 
 ## Troubleshooting
 
@@ -206,6 +201,7 @@ Example: `my-registry.hyd.cr.tower.cloud/web-portal/my-app:a1b2c3d`
 | `authentication failed` | Wrong Tower credentials or org ID | Verify in Tower Cloud portal |
 | `container instance not found` | `container_name` doesn't exist | Create it first in Tower Cloud portal |
 | `tower registry not found` | `tcr_name` doesn't exist | Create the registry in Tower Cloud portal |
+| `missing registry credentials` | External registry without `registry_username` / `registry_password` | Provide both — docker login is required |
 | `registry authentication failed` | Wrong registry credentials | Verify `registry_username` / `registry_password` |
 | `cannot reach registry` | Registry URL incorrect or unreachable | Check URL for typos, no `https://` |
 | `invalid reference format` | Registry URL has `https://` or uppercase chars | Use hostname only, lowercase |

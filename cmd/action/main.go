@@ -122,11 +122,12 @@ func run() error {
 
 		// Auto-detect Tower registry URL — use IAM credentials if no registry creds provided.
 		isTowerURL := strings.Contains(registryURL, "tower.cloud")
+		isTowerPath := false
 		if isTowerURL && regUser == "" && regPass == "" {
 			fmt.Println("Tower registry URL detected — using IAM credentials for registry authentication.")
 			regUser = cfg.TowerUser
 			regPass = cfg.TowerPassword
-			cfg.RegistryType = "tower"
+			isTowerPath = true
 		}
 
 		// External registries (GHCR, ECR, etc.) need owner in the path:
@@ -134,7 +135,7 @@ func run() error {
 		// imageTag for API: owner/repo/container:sha (without registry host)
 		imageTag := fmt.Sprintf("%s/%s/%s:%s", repoOwner, repoName, containerName, shortSHA)
 
-		if cfg.RegistryType == "tower" {
+		if isTowerPath {
 			// Tower URL without tcr_name — use repo-level path (no owner needed).
 			imageTag = fmt.Sprintf("%s/%s:%s", repoName, containerName, shortSHA)
 			fullImg := fmt.Sprintf("%s/%s/%s:%s", registryURL, repoName, containerName, shortSHA)
@@ -146,7 +147,7 @@ func run() error {
 			}
 		} else {
 			regCfg = tower.RegistryConfig{
-				Type:          cfg.RegistryType,
+				Type:          "private",
 				RegistryURL:   registryURL,
 				ImageTag:      imageTag,
 				Username:      regUser,
@@ -161,7 +162,7 @@ func run() error {
 	if isTower {
 		// Tower with tcr_name: {registry}/{repo}/{container}:{sha}
 		fullImageURL = regCfg.FullImage
-	} else if cfg.RegistryType == "tower" {
+	} else if regCfg.Type == "tower" {
 		// Tower URL without tcr_name: {registry}/{repo}/{container}:{sha}
 		fullImageURL = fmt.Sprintf("%s/%s/%s:%s", registryURL, repoName, containerName, shortSHA)
 	} else {
@@ -172,16 +173,12 @@ func run() error {
 	fmt.Printf("Image: %s\n", fullImageURL)
 
 	// ── Step 4: Docker Login ──
-	if regUser != "" && regPass != "" {
-		group("Docker login")
-		if err := docker.Login(registryURL, regUser, regPass); err != nil {
-			return err
-		}
-		fmt.Printf("Logged into %s\n", registryURL)
-		endGroup()
-	} else {
-		fmt.Printf("Skipping docker login — public registry '%s' (no credentials needed)\n", registryURL)
+	group("Docker login")
+	if err := docker.Login(registryURL, regUser, regPass); err != nil {
+		return err
 	}
+	fmt.Printf("Logged into %s\n", registryURL)
+	endGroup()
 
 	// ── Step 5: Build Image (linux/amd64) ──
 	group("Build container image")
@@ -240,9 +237,8 @@ type config struct {
 	OrganizationID   string
 	ContainerName    string
 	TCRName          string // Tower registry name (if tower)
-	RegistryType     string // "public" or "private" (if external)
 	RegistryURL      string // External registry URL
-	RegistryUsername  string // External registry username
+	RegistryUsername string // External registry username
 	RegistryPassword string // External registry password
 	BuildArguments   string
 	RepoOwner        string // GitHub repository owner (e.g., vinayteja-31)
@@ -269,9 +265,8 @@ func readConfig() config {
 		OrganizationID:   os.Getenv("INPUT_ORGANIZATION_ID"),
 		ContainerName:    os.Getenv("INPUT_CONTAINER_NAME"),
 		TCRName:          os.Getenv("INPUT_TCR_NAME"),
-		RegistryType:     envOrDefault("INPUT_REGISTRY_TYPE", "private"),
 		RegistryURL:      os.Getenv("INPUT_REGISTRY_URL"),
-		RegistryUsername:  os.Getenv("INPUT_REGISTRY_USERNAME"),
+		RegistryUsername: os.Getenv("INPUT_REGISTRY_USERNAME"),
 		RegistryPassword: os.Getenv("INPUT_REGISTRY_PASSWORD"),
 		BuildArguments:   os.Getenv("INPUT_BUILD_ARGUMENTS"),
 		RepoOwner:        repoOwner,
@@ -337,33 +332,26 @@ func validateConfig(cfg config) error {
 			return fmt.Errorf(
 				"missing required input: registry_url\n\n"+
 					"For external registries (Docker Hub, GHCR, etc.), provide:\n"+
-					"  - registry_url (always required)\n"+
-					"  - registry_username, registry_password (required for private registries)\n\n"+
+					"  - registry_url\n"+
+					"  - registry_username\n"+
+					"  - registry_password\n\n"+
 					"For Tower registries, provide:\n"+
 					"  - tcr_name (credentials are fetched automatically)",
 			)
 		}
 
-		// Private registry requires credentials.
-		if cfg.RegistryType == "private" && (cfg.RegistryUsername == "" || cfg.RegistryPassword == "") {
-			// Check if it's a Tower URL — IAM creds will be used automatically.
+		// Credentials are always required for external registries.
+		// Exception: Tower URLs auto-use IAM credentials from tower_user/tower_password.
+		if cfg.RegistryUsername == "" || cfg.RegistryPassword == "" {
 			if !strings.Contains(cfg.RegistryURL, "tower.cloud") {
 				return fmt.Errorf(
-					"missing registry credentials for private registry\n\n"+
-						"For private registries, provide:\n"+
-						"  - registry_username, registry_password\n\n"+
-						"For public registries, set registry_type to 'public'\n"+
+					"missing registry credentials\n\n" +
+						"Docker login is required to push images. Provide:\n" +
+						"  - registry_username\n" +
+						"  - registry_password\n\n" +
 						"For Tower registries, provide tcr_name or use a .tower.cloud registry URL",
 				)
 			}
-		}
-
-		// Validate registry_type.
-		if cfg.RegistryType != "public" && cfg.RegistryType != "private" {
-			return fmt.Errorf(
-				"invalid registry_type '%s' — must be 'public' or 'private'",
-				cfg.RegistryType,
-			)
 		}
 	}
 
