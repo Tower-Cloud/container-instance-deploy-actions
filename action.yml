@@ -1,66 +1,66 @@
-name: 'Tower Cloud Container Deploy'
-description: 'Build, push, and deploy a container image to Tower Cloud Container Instance'
+name: "Tower Cloud Container Deploy"
+description: "Build, push, and deploy a container image to Tower Cloud Container Instance"
 
 inputs:
   dockerfilePath:
-    description: 'Dockerfile path relative to project root'
+    description: "Dockerfile path relative to project root"
     required: false
-    default: 'Dockerfile'
+    default: "Dockerfile"
   tower_user:
-    description: 'Tower Cloud username'
+    description: "Tower Cloud username"
     required: true
   tower_password:
-    description: 'Tower Cloud password'
+    description: "Tower Cloud password"
     required: true
   organization_id:
-    description: 'Tower Cloud organization ID'
+    description: "Tower Cloud organization ID"
     required: true
   container_name:
-    description: 'Name of the existing container instance to update'
+    description: "Name of the existing container instance to update"
     required: true
 
   # Tower Registry (provide tcr_name — credentials fetched automatically)
   tcr_name:
-    description: 'Tower Container Registry name (auto-fetches URL and credentials)'
+    description: "Tower Container Registry name (auto-fetches URL and credentials)"
     required: false
-    default: ''
+    default: ""
 
   # External Registry (provide all three for any non-Tower registry)
   registry_url:
-    description: 'External registry hostname (e.g., docker.io, ghcr.io)'
+    description: "External registry hostname (e.g., docker.io, ghcr.io)"
     required: false
-    default: ''
+    default: ""
   registry_username:
-    description: 'External registry username for docker login'
+    description: "External registry username for docker login"
     required: false
-    default: ''
+    default: ""
   registry_password:
-    description: 'External registry password for docker login'
+    description: "External registry password for docker login"
     required: false
-    default: ''
+    default: ""
 
   buildArguments:
-    description: 'Docker build arguments (key=value per line)'
+    description: "Docker build arguments (key=value per line)"
     required: false
-    default: ''
+    default: ""
 
 outputs:
   taskId:
-    description: 'Deployment task ID returned by Tower Cloud'
+    description: "Deployment task ID returned by Tower Cloud"
     value: ${{ steps.run.outputs.taskId }}
   imageUrl:
-    description: 'Full image URL that was built and pushed'
+    description: "Full image URL that was built and pushed"
     value: ${{ steps.run.outputs.imageUrl }}
 
 runs:
-  using: 'composite'
+  using: "composite"
   steps:
     - name: Deploy to Tower Cloud
       id: run
       shell: bash
       run: ${{ github.action_path }}/dist/tci-deploy
       env:
-        TOWER_API_URL: 'https://api.dev.tower.cloud'
+        TOWER_API_URL: "https://api.tower.cloud"
         INPUT_APP_SOURCE_PATH: ${{ github.workspace }}
         INPUT_DOCKERFILE_PATH: ${{ inputs.dockerfilePath }}
         INPUT_TOWER_USER: ${{ inputs.tower_user }}
@@ -74,5 +74,5 @@ runs:
         INPUT_BUILD_ARGUMENTS: ${{ inputs.buildArguments }}
 
 branding:
-  icon: 'cloud'
-  color: 'blue'
+  icon: "cloud"
+  color: "blue"
