@@ -24,12 +24,20 @@ func run() error {
 		return err
 	}
 
+	// Mask secrets immediately.
 	mask(cfg.TowerPassword)
 	mask(cfg.RegistryPassword)
 
-	// Image URL: {registry_url}/{github_repo}/{container_name}:{github_sha}
-	// e.g., my-registry.hyd.cr.tower.cloud/my-cool-app/my-container:abc123
-	fullImageURL := fmt.Sprintf("%s/%s/%s:%s", cfg.RegistryURL, cfg.RepoName, cfg.ContainerName, cfg.GitHubSHA)
+	// Determine registry path: tower or external (public/private).
+	isTower := cfg.TCRName != ""
+
+	// Short SHA for image tag.
+	shortSHA := cfg.GitHubSHA
+	if len(shortSHA) > 7 {
+		shortSHA = shortSHA[:7]
+	}
+	repoName := strings.ToLower(cfg.RepoName)
+	containerName := strings.ToLower(cfg.ContainerName)
 
 	// ── Step 1: Login to Tower Cloud ──
 	group("Login to Tower Cloud")
@@ -57,7 +65,7 @@ func run() error {
 		return err
 	}
 
-	status := containerResp.Data.Status
+	status := containerResp.Data.Container.Status
 	fmt.Printf("Container instance '%s' found (status: %s)\n", cfg.ContainerName, status)
 
 	switch status {
@@ -72,22 +80,75 @@ func run() error {
 			"container instance '%s' is in 'failed' state (reason: %s)\n\n"+
 				"Resolve the issue in the Tower Cloud portal before attempting to deploy.\n"+
 				"You may need to delete and recreate the container instance",
-			cfg.ContainerName, containerResp.Data.StatusReason,
+			cfg.ContainerName, containerResp.Data.Container.StatusReason,
 		)
 	}
 
 	fmt.Println("Preflight checks passed")
 	endGroup()
 
-	// ── Step 3: Docker Login ──
+	// ── Step 3: Resolve registry credentials ──
+	var registryURL, regUser, regPass string
+	var regCfg tower.RegistryConfig
+
+	if isTower {
+		// Tower registry — fetch credentials from API.
+		group("Fetch Tower registry credentials")
+		fmt.Printf("Fetching credentials for Tower registry '%s'...\n", cfg.TCRName)
+
+		registryURL, regUser, regPass, err = client.GetRegistryCredentials(token, cfg.OrganizationID, cfg.TCRName)
+		if err != nil {
+			return err
+		}
+		mask(regPass)
+		fmt.Printf("Registry: %s\n", registryURL)
+		endGroup()
+
+		// Image: {registry_url}/{repo}/{container}:{sha}
+		fullImageURL := fmt.Sprintf("%s/%s/%s:%s", registryURL, repoName, containerName, shortSHA)
+
+		regCfg = tower.RegistryConfig{
+			Type:          "tower",
+			RegistryURL:   registryURL,
+			FullImage:     fullImageURL,
+			ContainerName: cfg.ContainerName,
+		}
+	} else {
+		// External registry — user provided credentials.
+		registryURL = cfg.RegistryURL
+		regUser = cfg.RegistryUsername
+		regPass = cfg.RegistryPassword
+
+		// imageTag for API: repo/container:sha (without registry host)
+		imageTag := fmt.Sprintf("%s/%s:%s", repoName, containerName, shortSHA)
+
+		regCfg = tower.RegistryConfig{
+			Type:          "private",
+			RegistryURL:   registryURL,
+			ImageTag:      imageTag,
+			Username:      regUser,
+			Password:      regPass,
+			ContainerName: cfg.ContainerName,
+		}
+	}
+
+	// Full docker tag: {registry_url}/{repo}/{container}:{sha}
+	fullImageURL := fmt.Sprintf("%s/%s/%s:%s", registryURL, repoName, containerName, shortSHA)
+	if isTower {
+		fullImageURL = regCfg.FullImage
+	}
+
+	fmt.Printf("Image: %s\n", fullImageURL)
+
+	// ── Step 4: Docker Login ──
 	group("Docker login")
-	if err := docker.Login(cfg.RegistryURL, cfg.RegistryUsername, cfg.RegistryPassword); err != nil {
+	if err := docker.Login(registryURL, regUser, regPass); err != nil {
 		return err
 	}
-	fmt.Printf("Logged into %s\n", cfg.RegistryURL)
+	fmt.Printf("Logged into %s\n", registryURL)
 	endGroup()
 
-	// ── Step 4: Build Image (linux/amd64) ──
+	// ── Step 5: Build Image (linux/amd64) ──
 	group("Build container image")
 	dockerfilePath := filepath.Join(cfg.AppSourcePath, cfg.DockerfilePath)
 	buildArgs := parseBuildArgs(cfg.BuildArguments)
@@ -99,7 +160,7 @@ func run() error {
 	fmt.Println("Image built successfully")
 	endGroup()
 
-	// ── Step 5: Push Image ──
+	// ── Step 6: Push Image ──
 	group("Push container image")
 	fmt.Printf("Pushing image: %s\n", fullImageURL)
 	if err := docker.Push(fullImageURL); err != nil {
@@ -108,8 +169,7 @@ func run() error {
 	fmt.Println("Image pushed successfully")
 	endGroup()
 
-	// ── Step 6: Re-authenticate + Update Container Instance ──
-	// Token may have expired during docker build/push — get a fresh one.
+	// ── Step 7: Re-authenticate + Update Container Instance ──
 	group("Update container instance")
 	fmt.Println("Re-authenticating before deploy...")
 	token, err = client.Login(cfg.TowerUser, cfg.TowerPassword, cfg.OrganizationID)
@@ -118,8 +178,8 @@ func run() error {
 	}
 	mask(token)
 
-	fmt.Printf("Updating container instance '%s' with image: %s\n", cfg.ContainerName, fullImageURL)
-	taskID, err := client.UpdateContainer(token, cfg.OrganizationID, cfg.ContainerName, fullImageURL)
+	fmt.Printf("Updating container instance '%s' (registry type: %s)\n", cfg.ContainerName, regCfg.Type)
+	taskID, err := client.UpdateContainer(token, cfg.OrganizationID, cfg.ContainerName, regCfg)
 	if err != nil {
 		return fmt.Errorf("failed to update container instance: %w", err)
 	}
@@ -144,16 +204,16 @@ type config struct {
 	TowerPassword    string
 	OrganizationID   string
 	ContainerName    string
-	RegistryURL      string
-	RegistryUsername  string
-	RegistryPassword string
+	TCRName          string // Tower registry name (if tower)
+	RegistryURL      string // External registry URL
+	RegistryUsername  string // External registry username
+	RegistryPassword string // External registry password
 	BuildArguments   string
-	RepoName         string // extracted from GITHUB_REPOSITORY (owner/repo → repo)
+	RepoName         string
 	GitHubSHA        string
 }
 
 func readConfig() config {
-	// GITHUB_REPOSITORY is "owner/repo-name" — extract just the repo name.
 	repoName := ""
 	if fullRepo := os.Getenv("GITHUB_REPOSITORY"); fullRepo != "" {
 		parts := strings.SplitN(fullRepo, "/", 2)
@@ -169,6 +229,7 @@ func readConfig() config {
 		TowerPassword:    os.Getenv("INPUT_TOWER_PASSWORD"),
 		OrganizationID:   os.Getenv("INPUT_ORGANIZATION_ID"),
 		ContainerName:    os.Getenv("INPUT_CONTAINER_NAME"),
+		TCRName:          os.Getenv("INPUT_TCR_NAME"),
 		RegistryURL:      os.Getenv("INPUT_REGISTRY_URL"),
 		RegistryUsername:  os.Getenv("INPUT_REGISTRY_USERNAME"),
 		RegistryPassword: os.Getenv("INPUT_REGISTRY_PASSWORD"),
@@ -214,27 +275,43 @@ func validateConfig(cfg config) error {
 	if cfg.ContainerName == "" {
 		missing = append(missing, "container_name")
 	}
-	if cfg.RegistryURL == "" {
-		missing = append(missing, "registry_url")
-	}
-	if cfg.RegistryUsername == "" {
-		missing = append(missing, "registry_username")
-	}
-	if cfg.RegistryPassword == "" {
-		missing = append(missing, "registry_password")
-	}
 
 	if len(missing) > 0 {
 		return fmt.Errorf(
 			"missing required inputs: %s\n\n"+
 				"Prerequisites before using this action:\n"+
-				"  1. Create a Tower Cloud account at https://console.tower.cloud\n"+
-				"  2. Create a Container Registry (TCR) and note the registry URL\n"+
-				"  3. Create a Container Instance (TCI) using an image from that registry\n"+
-				"  4. Add credentials as GitHub secrets\n"+
-				"  5. Provide container_name and registry_url in the workflow inputs",
+				"  1. Create a Tower Cloud account at https://portal.dev.tower.cloud\n"+
+				"  2. Create a Container Registry and a Container Instance\n"+
+				"  3. Add credentials as GitHub secrets\n"+
+				"  4. Provide container_name in the workflow inputs",
 			strings.Join(missing, ", "),
 		)
+	}
+
+	isTower := cfg.TCRName != ""
+
+	if !isTower {
+		// External registry — need URL + creds.
+		var extMissing []string
+		if cfg.RegistryURL == "" {
+			extMissing = append(extMissing, "registry_url")
+		}
+		if cfg.RegistryUsername == "" {
+			extMissing = append(extMissing, "registry_username")
+		}
+		if cfg.RegistryPassword == "" {
+			extMissing = append(extMissing, "registry_password")
+		}
+		if len(extMissing) > 0 {
+			return fmt.Errorf(
+				"missing required inputs for external registry: %s\n\n"+
+					"For external registries (Docker Hub, GHCR, ACR, GCR, etc.), provide:\n"+
+					"  - registry_url, registry_username, registry_password\n\n"+
+					"For Tower registries, provide:\n"+
+					"  - tcr_name (credentials are fetched automatically)",
+				strings.Join(extMissing, ", "),
+			)
+		}
 	}
 
 	if cfg.RepoName == "" {

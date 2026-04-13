@@ -56,6 +56,10 @@ func (c *Client) Login(username, password, orgID string) (string, error) {
 	}
 
 	if resp.StatusCode != http.StatusOK {
+		var apiErr APIError
+		if err := json.Unmarshal(respBody, &apiErr); err == nil && apiErr.Error.Message != "" {
+			return "", fmt.Errorf("login failed (%s): %s", apiErr.Error.Code, apiErr.Error.Message)
+		}
 		return "", fmt.Errorf("login failed with status %d: %s", resp.StatusCode, string(respBody))
 	}
 
@@ -64,20 +68,16 @@ func (c *Client) Login(username, password, orgID string) (string, error) {
 		return "", fmt.Errorf("failed to parse login response: %w", err)
 	}
 
-	if !loginResp.Success {
-		return "", fmt.Errorf("login failed: %s - %s", loginResp.Error, loginResp.Message)
+	if loginResp.AccessToken == "" {
+		return "", fmt.Errorf("login succeeded but no access token returned (response: %s)", string(respBody))
 	}
 
-	if loginResp.Data.AccessToken == "" {
-		return "", fmt.Errorf("login succeeded but no access token returned")
-	}
-
-	return loginResp.Data.AccessToken, nil
+	return loginResp.AccessToken, nil
 }
 
 // GetContainer checks if a container instance exists and returns its details.
-func (c *Client) GetContainer(token, orgID, tciName string) (*ContainerResponse, error) {
-	url := fmt.Sprintf("%s/service/container-instance/%s", c.apiURL, tciName)
+func (c *Client) GetContainer(token, orgID, containerName string) (*ContainerResponse, error) {
+	url := fmt.Sprintf("%s/service/container-instance/%s", c.apiURL, containerName)
 
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
@@ -102,10 +102,10 @@ func (c *Client) GetContainer(token, orgID, tciName string) (*ContainerResponse,
 			"container instance '%s' not found\n\n"+
 				"This action only updates existing container instances — it does not create new ones.\n"+
 				"Please create the container instance first via the Tower Cloud portal:\n"+
-				"  1. Go to https://console.tower.cloud\n"+
+				"  1. Go to https://portal.dev.tower.cloud\n"+
 				"  2. Navigate to Container Instances > Create Instance\n"+
 				"  3. Use the instance name as the 'container_name' input in your workflow",
-			tciName,
+			containerName,
 		)
 	}
 
@@ -119,21 +119,87 @@ func (c *Client) GetContainer(token, orgID, tciName string) (*ContainerResponse,
 	}
 
 	if !containerResp.Success {
-		return nil, fmt.Errorf("failed to get container instance: %s - %s", containerResp.Error, containerResp.Message)
+		return nil, fmt.Errorf("failed to get container instance: %s", containerResp.Error)
 	}
 
 	return &containerResp, nil
 }
 
-// UpdateContainer updates an existing container instance with a new image tag.
-func (c *Client) UpdateContainer(token, orgID, tciName, imageTag string) (string, error) {
-	url := fmt.Sprintf("%s/service/container-instance/%s", c.apiURL, tciName)
+// GetRegistryCredentials fetches Tower registry credentials from the API gateway.
+func (c *Client) GetRegistryCredentials(token, orgID, tcrName string) (registryURL, username, password string, err error) {
+	url := fmt.Sprintf("%s/service/container-registry/credentials/%s", c.apiURL, tcrName)
 
-	payload := UpdateContainerRequest{
-		ContainerSpec: ContainerSpec{
-			ImageTag: imageTag,
-		},
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return "", "", "", fmt.Errorf("failed to create registry credentials request: %w", err)
 	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("X-Organization-ID", orgID)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", "", "", fmt.Errorf("registry credentials request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", "", "", fmt.Errorf("failed to read registry credentials response: %w", err)
+	}
+
+	if resp.StatusCode == http.StatusNotFound {
+		return "", "", "", fmt.Errorf(
+			"tower registry '%s' not found\n\n"+
+				"Please create the container registry first via the Tower Cloud portal:\n"+
+				"  1. Go to https://portal.dev.tower.cloud\n"+
+				"  2. Navigate to Container Registries > Create Registry\n"+
+				"  3. Use the registry name as the 'tcr_name' input",
+			tcrName,
+		)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return "", "", "", fmt.Errorf("failed to get registry credentials (status %d): %s", resp.StatusCode, string(respBody))
+	}
+
+	var credsResp RegistryCredentialsResponse
+	if err := json.Unmarshal(respBody, &credsResp); err != nil {
+		return "", "", "", fmt.Errorf("failed to parse registry credentials response: %w", err)
+	}
+
+	if !credsResp.Success {
+		return "", "", "", fmt.Errorf("failed to get registry credentials: %s - %s", credsResp.Error, credsResp.Message)
+	}
+
+	return credsResp.Data.RegistryURL, credsResp.Data.Username, credsResp.Data.Password, nil
+}
+
+// UpdateContainer updates an existing container instance with a new image.
+// Builds the correct API payload based on the registry config type.
+func (c *Client) UpdateContainer(token, orgID, containerName string, regCfg RegistryConfig) (string, error) {
+	url := fmt.Sprintf("%s/service/container-instance/%s", c.apiURL, containerName)
+
+	spec := UpdateContainerSpec{
+		RegistryType: regCfg.Type,
+	}
+
+	switch regCfg.Type {
+	case "tower":
+		spec.TowerImage = regCfg.FullImage
+	case "public":
+		spec.Registry = regCfg.RegistryURL
+		spec.ImageTag = regCfg.ImageTag
+	case "private":
+		spec.Registry = regCfg.RegistryURL
+		spec.ImageTag = regCfg.ImageTag
+		spec.RegistryCredentials = &RegistryCredentials{
+			Username: regCfg.Username,
+			Password: regCfg.Password,
+			Label:    regCfg.ContainerName + "-registry-secret",
+		}
+	}
+
+	payload := UpdateContainerRequest{ContainerSpec: spec}
 
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -169,7 +235,7 @@ func (c *Client) UpdateContainer(token, orgID, tciName, imageTag string) (string
 	}
 
 	if !updateResp.Success {
-		return "", fmt.Errorf("update container failed: %s - %s", updateResp.Error, updateResp.Message)
+		return "", fmt.Errorf("update container failed: %s", updateResp.Error)
 	}
 
 	return updateResp.Data.TaskID, nil

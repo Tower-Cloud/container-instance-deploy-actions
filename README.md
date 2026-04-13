@@ -2,9 +2,13 @@
 
 Build, push, and deploy a container image to Tower Cloud — in a single step.
 
-Commit code, add this action to your workflow, and your changes are live. Works with any language — your Dockerfile defines how the app is built.
+Works with **Tower registries**, **Docker Hub**, **GHCR**, **GCR**, **ECR**, or any Docker-compatible registry.
 
 ## Usage
+
+### Tower Registry
+
+Just provide `tcr_name` — credentials are fetched automatically.
 
 ```yaml
 name: Deploy to Tower Cloud
@@ -18,60 +22,141 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build and deploy container
+      - name: Build and deploy
         uses: tower-cloud/container-instance-deploy-actions@main
         with:
           tower_user: ${{ secrets.TOWER_USER }}
           tower_password: ${{ secrets.TOWER_PASSWORD }}
           organization_id: ${{ secrets.TOWER_ORG_ID }}
-          container_name: my-container
+          container_name: my-app
+          tcr_name: ${{ secrets.TCR_NAME }}
+```
+
+### External Registry (Docker Hub, GHCR, ACR, GCR, ECR, etc.)
+
+Provide registry URL and credentials. Works for both public and private registries — credentials are always needed for push.
+
+```yaml
+      - name: Build and deploy
+        uses: tower-cloud/container-instance-deploy-actions@main
+        with:
+          tower_user: ${{ secrets.TOWER_USER }}
+          tower_password: ${{ secrets.TOWER_PASSWORD }}
+          organization_id: ${{ secrets.TOWER_ORG_ID }}
+          container_name: my-app
           registry_url: ${{ secrets.REGISTRY_URL }}
           registry_username: ${{ secrets.REGISTRY_USERNAME }}
           registry_password: ${{ secrets.REGISTRY_PASSWORD }}
+```
+
+### Custom Dockerfile Path
+
+If your Dockerfile is not in the project root:
+
+```yaml
+      - name: Build and deploy
+        uses: tower-cloud/container-instance-deploy-actions@main
+        with:
+          tower_user: ${{ secrets.TOWER_USER }}
+          tower_password: ${{ secrets.TOWER_PASSWORD }}
+          organization_id: ${{ secrets.TOWER_ORG_ID }}
+          container_name: my-app
+          tcr_name: ${{ secrets.TCR_NAME }}
+          dockerfilePath: docker/Dockerfile.prod
+```
+
+### Build Arguments
+
+Pass Docker build arguments as multiline key=value pairs:
+
+```yaml
+      - name: Build and deploy
+        uses: tower-cloud/container-instance-deploy-actions@main
+        with:
+          tower_user: ${{ secrets.TOWER_USER }}
+          tower_password: ${{ secrets.TOWER_PASSWORD }}
+          organization_id: ${{ secrets.TOWER_ORG_ID }}
+          container_name: my-app
+          tcr_name: ${{ secrets.TCR_NAME }}
+          buildArguments: |
+            NODE_ENV=production
+            API_URL=https://api.example.com
+            BUILD_VERSION=${{ github.sha }}
+```
+
+### Using Outputs
+
+Access the deployment task ID and image URL in subsequent steps:
+
+```yaml
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and deploy
+        id: deploy
+        uses: tower-cloud/container-instance-deploy-actions@main
+        with:
+          tower_user: ${{ secrets.TOWER_USER }}
+          tower_password: ${{ secrets.TOWER_PASSWORD }}
+          organization_id: ${{ secrets.TOWER_ORG_ID }}
+          container_name: my-app
+          tcr_name: ${{ secrets.TCR_NAME }}
+
+      - name: Print deployment info
+        run: |
+          echo "Task ID: ${{ steps.deploy.outputs.taskId }}"
+          echo "Image:   ${{ steps.deploy.outputs.imageUrl }}"
+
+      - name: Notify on success
+        if: success()
+        run: echo "Deployed ${{ steps.deploy.outputs.imageUrl }} successfully"
 ```
 
 ## How It Works
 
 1. **Authenticates** with Tower Cloud
 2. **Verifies** the container instance exists and is updatable
-3. **Logs into** your container registry
-4. **Builds** your Docker image for `linux/amd64`
-5. **Pushes** the image to your registry
-6. **Updates** the container instance with the new image
-
-## Image Tagging Convention
-
-Images are automatically tagged using a deterministic convention — no configuration needed:
-
-```
-{registry_url}/{github_repo_name}/{container_name}:{commit_sha}
-```
-
-**Example:** If your GitHub repo is `acme/web-portal`, your container instance is `portal-app`, and the registry is `my-registry.hyd.cr.tower.cloud`:
-
-```
-my-registry.hyd.cr.tower.cloud/web-portal/portal-app:a1b2c3d4e5f6
-```
-
-This ensures:
-- Every image is uniquely tied to a commit
-- Registry is organized by repo → container
-- Full audit trail for rollbacks
-- No ambiguity — same commit always produces the same tag
+3. **Resolves registry** — fetches Tower credentials or uses provided ones
+4. **Logs into** the registry
+5. **Builds** your Docker image for `linux/amd64`
+6. **Pushes** the image to the registry
+7. **Re-authenticates** (handles token expiry during long builds)
+8. **Updates** the container instance with the new image
 
 ## Inputs
 
-| Input | Required | Default | Description |
-|-------|----------|---------|-------------|
-| `dockerfilePath` | No | `Dockerfile` | Dockerfile path relative to project root |
-| `tower_user` | Yes | — | Tower Cloud username |
-| `tower_password` | Yes | — | Tower Cloud password |
-| `organization_id` | Yes | — | Tower Cloud organization ID |
-| `container_name` | Yes | — | Name of the existing container instance to update |
-| `registry_url` | Yes | — | Container registry URL |
-| `registry_username` | Yes | — | Registry username for docker login |
-| `registry_password` | Yes | — | Registry password for docker login |
-| `buildArguments` | No | — | Docker build arguments (key=value per line) |
+### Always Required
+
+| Input | Description |
+|-------|-------------|
+| `tower_user` | Tower Cloud username |
+| `tower_password` | Tower Cloud password |
+| `organization_id` | Tower Cloud organization ID |
+| `container_name` | Name of the existing container instance to update |
+
+### Tower Registry
+
+| Input | Required | Description |
+|-------|----------|-------------|
+| `tcr_name` | Yes | Tower Container Registry name (credentials fetched automatically) |
+
+### External Registry (Docker Hub, GHCR, ACR, GCR, ECR, etc.)
+
+| Input | Required | Description |
+|-------|----------|-------------|
+| `registry_url` | Yes | Registry hostname (e.g., `docker.io`, `ghcr.io`) — **no `https://`** |
+| `registry_username` | Yes | Registry username |
+| `registry_password` | Yes | Registry password or access token |
+
+### Optional
+
+| Input | Default | Description |
+|-------|---------|-------------|
+| `dockerfilePath` | `Dockerfile` | Dockerfile path relative to project root |
+| `buildArguments` | — | Docker build arguments (key=value per line) |
 
 ## Outputs
 
@@ -80,77 +165,33 @@ This ensures:
 | `taskId` | Deployment task ID returned by Tower Cloud |
 | `imageUrl` | Full image URL that was built and pushed |
 
+## Image Tagging
+
+Images are automatically tagged:
+
+```
+{registry_url}/{github_repo_name}/{container_name}:{short_commit_sha}
+```
+
+Example: `my-registry.hyd.cr.tower.cloud/web-portal/my-app:a1b2c3d`
+
 ## Prerequisites
 
-Before using this action, you **must** complete the following setup:
+1. **Tower Cloud account** — sign up at [portal.dev.tower.cloud](https://portal.dev.tower.cloud)
+2. **Container instance** — create via Tower Cloud portal (this action only updates, never creates)
+3. **Container registry** — either a Tower registry or any external Docker-compatible registry
+4. **Dockerfile** in your repository
+5. **GitHub secrets** configured in your app repo
 
-### 1. Tower Cloud Account
-Sign up at [console.tower.cloud](https://console.tower.cloud) and note your **Organization ID**.
+## Troubleshooting
 
-### 2. Container Registry (TCR)
-Create a container registry via the Tower Cloud portal and note:
-- **Registry URL** (e.g., `my-registry.hyd.cr.tower.cloud`)
-- **Username** and **Password** for docker login
-
-### 3. Container Instance (TCI)
-Create a container instance via the Tower Cloud portal:
-- Configure your instance (SKU, ports, environment variables, etc.)
-- Note the **instance name** — this is your `container_name`
-
-> This action **only updates** existing container instances. It does not create new ones.
-
-### 4. Dockerfile (yours)
-Your repository must contain a `Dockerfile`. The action builds it targeting **linux/amd64** (Tower Cloud cluster architecture).
-
-### 5. GitHub Secrets
-Add these secrets to your GitHub repository (`Settings > Secrets and variables > Actions`):
-
-| Secret | Description |
-|--------|-------------|
-| `TOWER_USER` | Tower Cloud username |
-| `TOWER_PASSWORD` | Tower Cloud password |
-| `TOWER_ORG_ID` | Tower Cloud Organization ID |
-| `REGISTRY_URL` | Registry URL (e.g., `my-registry.hyd.cr.tower.cloud`) |
-| `REGISTRY_USERNAME` | Registry username |
-| `REGISTRY_PASSWORD` | Registry password |
-
-## Build Arguments
-
-Pass Docker build arguments as multiline key=value pairs:
-
-```yaml
-- name: Build and deploy
-  uses: tower-cloud/container-instance-deploy-actions@main
-  with:
-    tower_user: ${{ secrets.TOWER_USER }}
-    tower_password: ${{ secrets.TOWER_PASSWORD }}
-    organization_id: ${{ secrets.TOWER_ORG_ID }}
-    container_name: my-container
-    registry_url: ${{ secrets.REGISTRY_URL }}
-    registry_username: ${{ secrets.REGISTRY_USERNAME }}
-    registry_password: ${{ secrets.REGISTRY_PASSWORD }}
-    buildArguments: |
-      NODE_ENV=production
-      API_URL=https://api.example.com
-```
-
-## Using Outputs
-
-```yaml
-- name: Build and deploy
-  id: deploy
-  uses: tower-cloud/container-instance-deploy-actions@main
-  with:
-    tower_user: ${{ secrets.TOWER_USER }}
-    tower_password: ${{ secrets.TOWER_PASSWORD }}
-    organization_id: ${{ secrets.TOWER_ORG_ID }}
-    container_name: my-container
-    registry_url: ${{ secrets.REGISTRY_URL }}
-    registry_username: ${{ secrets.REGISTRY_USERNAME }}
-    registry_password: ${{ secrets.REGISTRY_PASSWORD }}
-
-- name: Print deployment info
-  run: |
-    echo "Task ID: ${{ steps.deploy.outputs.taskId }}"
-    echo "Image:   ${{ steps.deploy.outputs.imageUrl }}"
-```
+| Error | Cause | Fix |
+|-------|-------|-----|
+| `authentication failed` | Wrong Tower credentials or org ID | Verify in Tower Cloud portal |
+| `container instance not found` | `container_name` doesn't exist | Create it first in Tower Cloud portal |
+| `tower registry not found` | `tcr_name` doesn't exist | Create the registry in Tower Cloud portal |
+| `registry authentication failed` | Wrong registry credentials | Verify `registry_username` / `registry_password` |
+| `cannot reach registry` | Registry URL incorrect or unreachable | Check URL for typos, no `https://` |
+| `invalid reference format` | Registry URL has `https://` or uppercase chars | Use hostname only, lowercase |
+| `container is provisioning/pending` | Previous deploy still in progress | Wait and retry |
+| `container is in failed state` | Container has terminal error | Resolve in Tower Cloud portal |
