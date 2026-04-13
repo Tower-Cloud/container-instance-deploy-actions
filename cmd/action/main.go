@@ -312,6 +312,14 @@ func validateConfig(cfg config) error {
 				strings.Join(extMissing, ", "),
 			)
 		}
+
+		if strings.HasPrefix(cfg.RegistryURL, "https://") || strings.HasPrefix(cfg.RegistryURL, "http://") {
+			return fmt.Errorf(
+				"invalid registry_url '%s': must be a hostname only, without https:// or http://\n\n"+
+					"Examples: docker.io, ghcr.io, my-registry.hyd.cr.tower.cloud",
+				cfg.RegistryURL,
+			)
+		}
 	}
 
 	if cfg.RepoName == "" {

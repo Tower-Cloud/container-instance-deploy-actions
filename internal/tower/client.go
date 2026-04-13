@@ -186,9 +186,6 @@ func (c *Client) UpdateContainer(token, orgID, containerName string, regCfg Regi
 	switch regCfg.Type {
 	case "tower":
 		spec.TowerImage = regCfg.FullImage
-	case "public":
-		spec.Registry = regCfg.RegistryURL
-		spec.ImageTag = regCfg.ImageTag
 	case "private":
 		spec.Registry = regCfg.RegistryURL
 		spec.ImageTag = regCfg.ImageTag

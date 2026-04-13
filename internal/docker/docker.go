@@ -27,22 +27,21 @@ func Login(registryURL, username, password string) error {
 			return fmt.Errorf(
 				"registry authentication failed for '%s'\n\n"+
 					"Your registry_username or registry_password is incorrect.\n"+
-					"Verify your credentials in the Tower Cloud portal under Container Registries",
+					"Verify your credentials and try again",
 				registryURL,
 			)
 		case strings.Contains(lower, "not found") || strings.Contains(lower, "404"):
 			return fmt.Errorf(
 				"registry '%s' not found\n\n"+
 					"The registry_url does not point to a valid registry.\n"+
-					"Verify the URL in the Tower Cloud portal under Container Registries",
+					"Check for typos — use the hostname only, without https://",
 				registryURL,
 			)
 		case strings.Contains(lower, "no such host") || strings.Contains(lower, "could not resolve") || strings.Contains(lower, "connection refused"):
 			return fmt.Errorf(
 				"cannot reach registry '%s'\n\n"+
 					"The registry URL is unreachable. Possible causes:\n"+
-					"  - The registry does not exist — create it first via the Tower Cloud portal\n"+
-					"  - The URL is incorrect — check for typos\n"+
+					"  - The URL is incorrect — check for typos, no https://\n"+
 					"  - Network issue — the registry may be temporarily unavailable",
 				registryURL,
 			)
@@ -93,7 +92,7 @@ func Push(imageURL string) error {
 			return fmt.Errorf(
 				"permission denied pushing to registry\n\n"+
 					"Your credentials may not have push access.\n"+
-					"Verify your registry permissions in the Tower Cloud portal",
+					"Verify that the provided credentials have write/push permissions",
 			)
 		default:
 			return fmt.Errorf("docker push failed: %s", errMsg)
