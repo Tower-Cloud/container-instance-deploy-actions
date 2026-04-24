@@ -55,6 +55,9 @@ outputs:
 runs:
   using: 'composite'
   steps:
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
     - name: Deploy to Tower Cloud
       id: run
       shell: bash
