@@ -78,6 +78,7 @@ func BuildAndPush(imageURL, cacheRef, dockerfilePath, context string, buildArgs 
 	args := []string{
 		"buildx", "build",
 		"--platform", "linux/amd64",
+		"--progress=plain",
 		"-t", imageURL,
 		"-f", dockerfilePath,
 		"--push",
