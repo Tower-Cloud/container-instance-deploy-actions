@@ -60,27 +60,27 @@ func run() error {
 	group("Preflight checks")
 
 	fmt.Printf("Checking container instance '%s'...\n", cfg.ContainerName)
-	containerResp, err := client.GetContainer(token, cfg.OrganizationID, cfg.ContainerName)
+	container, err := client.GetContainer(token, cfg.OrganizationID, cfg.ContainerName)
 	if err != nil {
 		return err
 	}
 
-	status := containerResp.Data.Container.Status
+	status := container.Status
 	fmt.Printf("Container instance '%s' found (status: %s)\n", cfg.ContainerName, status)
 
 	switch status {
-	case "provisioning", "pending":
+	case "provisioning", "pending", "updating":
 		return fmt.Errorf(
 			"container instance '%s' is currently '%s' — cannot update while a previous operation is in progress\n\n"+
 				"Wait for the current operation to complete before deploying again",
 			cfg.ContainerName, status,
 		)
-	case "failed":
+	case "failed", "error":
 		return fmt.Errorf(
-			"container instance '%s' is in 'failed' state (reason: %s)\n\n"+
+			"container instance '%s' is in '%s' state (reason: %s)\n\n"+
 				"Resolve the issue in the Tower Cloud portal before attempting to deploy.\n"+
 				"You may need to delete and recreate the container instance",
-			cfg.ContainerName, containerResp.Data.Container.StatusReason,
+			cfg.ContainerName, status, container.StatusReason,
 		)
 	}
 
@@ -109,7 +109,6 @@ func run() error {
 
 		regCfg = tower.RegistryConfig{
 			Type:          "tower",
-			RegistryURL:   registryURL,
 			FullImage:     fullImageURL,
 			ContainerName: cfg.ContainerName,
 		}
@@ -119,24 +118,18 @@ func run() error {
 		regUser = cfg.RegistryUsername
 		regPass = cfg.RegistryPassword
 
-		// imageTag for API: repo/container:sha (without registry host)
-		imageTag := fmt.Sprintf("%s/%s:%s", repoName, containerName, shortSHA)
-
+		// v1 PATCH /image takes a single fully-qualified reference; the
+		// service parses host/repo/tag itself rather than us splitting them.
 		regCfg = tower.RegistryConfig{
 			Type:          "private",
-			RegistryURL:   registryURL,
-			ImageTag:      imageTag,
+			FullImage:     fmt.Sprintf("%s/%s/%s:%s", registryURL, repoName, containerName, shortSHA),
 			Username:      regUser,
 			Password:      regPass,
 			ContainerName: cfg.ContainerName,
 		}
 	}
 
-	// Full docker tag: {registry_url}/{repo}/{container}:{sha}
-	fullImageURL := fmt.Sprintf("%s/%s/%s:%s", registryURL, repoName, containerName, shortSHA)
-	if isTower {
-		fullImageURL = regCfg.FullImage
-	}
+	fullImageURL := regCfg.FullImage
 
 	fmt.Printf("Image: %s\n", fullImageURL)
 
@@ -179,11 +172,11 @@ func run() error {
 	mask(token)
 
 	fmt.Printf("Updating container instance '%s' (registry type: %s)\n", cfg.ContainerName, regCfg.Type)
-	taskID, err := client.UpdateContainer(token, cfg.OrganizationID, cfg.ContainerName, regCfg)
+	taskID, err := client.PatchContainerImage(token, cfg.OrganizationID, cfg.ContainerName, regCfg)
 	if err != nil {
 		return fmt.Errorf("failed to update container instance: %w", err)
 	}
-	fmt.Printf("Container update accepted (taskId: %s)\n", taskID)
+	fmt.Printf("Container update accepted (operation id: %s)\n", taskID)
 	endGroup()
 
 	setOutput("taskId", taskID)

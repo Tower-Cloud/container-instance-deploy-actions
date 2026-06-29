@@ -1,6 +1,7 @@
 package tower
 
-// LoginRequest is the payload for POST /public?action=login
+// LoginRequest is the payload for POST /public?action=login (IAM service —
+// unchanged by the container-instance v1 migration).
 type LoginRequest struct {
 	Username       string `json:"username"`
 	Password       string `json:"password"`
@@ -14,7 +15,8 @@ type LoginResponse struct {
 	TokenType   string `json:"token_type"`
 }
 
-// APIError — error response format from IAM service.
+// APIError — legacy/IAM error response format ({error: {code, message}} OR
+// just {error: "..."}). Kept for the login path which is not on v1 yet.
 type APIError struct {
 	Error struct {
 		Message string `json:"message"`
@@ -22,26 +24,99 @@ type APIError struct {
 	} `json:"error"`
 }
 
-// ContainerResponse is the response from GET /service/container-instance/{name}
-type ContainerResponse struct {
-	Success bool `json:"success"`
-	Data    struct {
-		Container struct {
-			Name          string `json:"name"`
-			Status        string `json:"status"`
-			StatusReason  string `json:"statusReason,omitempty"`
-			StatusMessage string `json:"statusMessage,omitempty"`
-			Image         string `json:"image,omitempty"`
-			ImageTag      string `json:"imageTag,omitempty"`
-			Registry      string `json:"registry,omitempty"`
-			RegistryType  string `json:"registryType,omitempty"`
-			Replicas      int    `json:"replicas,omitempty"`
-		} `json:"container"`
-	} `json:"data"`
-	Error string `json:"error,omitempty"`
+// ---------------------------------------------------------------------------
+// v1 envelopes — every container-instance v1 endpoint returns either
+// `{"data": ...}` on success or `{"error": {"code", "message", "details",
+// "requestId"}}` on failure. The IAM/registry endpoints still use the legacy
+// shapes above.
+// ---------------------------------------------------------------------------
+
+// V1Error is the v1 error envelope. `Code` is a stable machine-readable
+// identifier (e.g. REGISTRY_SECRET_LABEL_TAKEN); `Message` is user-safe text.
+type V1Error struct {
+	Code      string                 `json:"code"`
+	Message   string                 `json:"message"`
+	Details   map[string]interface{} `json:"details,omitempty"`
+	RequestID string                 `json:"requestId,omitempty"`
 }
 
-// RegistryCredentialsResponse is the response from GET /service/container-registry/credentials/{name}
+type V1ErrorEnvelope struct {
+	Error *V1Error `json:"error,omitempty"`
+}
+
+// V1Image is the new structured image block on container detail responses
+// (legacy returned `image`/`imageTag`/`registry` as separate top-level strings).
+type V1Image struct {
+	Repository   string `json:"repository"`
+	Tag          string `json:"tag,omitempty"`
+	Registry     string `json:"registry,omitempty"`
+	RegistryType string `json:"registryType,omitempty"`
+}
+
+// V1Container is the public detail DTO returned by
+// GET /service/container-instance/containers/{name}.
+type V1Container struct {
+	Name          string  `json:"name"`
+	Status        string  `json:"status"`
+	StatusReason  string  `json:"statusReason,omitempty"`
+	StatusMessage string  `json:"statusMessage,omitempty"`
+	Image         V1Image `json:"image"`
+	URL           string  `json:"url,omitempty"`
+	Replicas      int     `json:"replicas,omitempty"`
+}
+
+// V1ContainerResponse — top-level envelope around V1Container.
+type V1ContainerResponse struct {
+	Data struct {
+		Container V1Container `json:"container"`
+	} `json:"data"`
+	Error *V1Error `json:"error,omitempty"`
+}
+
+// V1Credentials is the inline credential block on PATCH /image. `Label` is
+// the saved-secret identifier under which v1 will store the credentials so
+// future deploys can reference it via `credentialsLabel`.
+type V1Credentials struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
+	Email    string `json:"email,omitempty"`
+	Label    string `json:"label"`
+}
+
+// V1PatchImageRequest is the body for
+// PATCH /service/container-instance/containers/{name}/image.
+//
+// Exactly one of `Credentials` or `CredentialsLabel` may be set — both is a
+// 400, neither means the image is treated as a public registry pull.
+type V1PatchImageRequest struct {
+	Image            string         `json:"image"`
+	Credentials      *V1Credentials `json:"credentials,omitempty"`
+	CredentialsLabel string         `json:"credentialsLabel,omitempty"`
+}
+
+// V1Operation is the operation block embedded in every async-mutation
+// response. The `ID` field is what callers poll on at
+// GET /service/container-instance/operations/{id}.
+type V1Operation struct {
+	ID        string `json:"id"`
+	Type      string `json:"type"`
+	Status    string `json:"status"`
+	Container string `json:"container"`
+	Message   string `json:"message"`
+	CreatedAt string `json:"createdAt"`
+}
+
+// V1OperationResponse is the 202-Accepted body returned by every mutating v1
+// endpoint (PATCH /image, /resources, POST /start, etc).
+type V1OperationResponse struct {
+	Data struct {
+		Operation V1Operation `json:"operation"`
+	} `json:"data"`
+	Error *V1Error `json:"error,omitempty"`
+}
+
+// RegistryCredentialsResponse — legacy shape from the container-registry
+// service. The TCR credentials endpoint is not part of the v1 migration.
 type RegistryCredentialsResponse struct {
 	Success bool `json:"success"`
 	Data    struct {
@@ -53,44 +128,13 @@ type RegistryCredentialsResponse struct {
 	Message string `json:"message,omitempty"`
 }
 
-// RegistryConfig holds all registry info needed for the update call.
+// RegistryConfig is internal state — what main.go assembles after resolving
+// either Tower credentials or external creds, and what the API client
+// translates into a V1PatchImageRequest.
 type RegistryConfig struct {
-	Type          string // "tower", "public", "private"
-	RegistryURL   string // registry hostname
-	ImageTag      string // repo/app:sha (without host, for public/private)
-	FullImage     string // full URL (for tower towerImage)
-	Username      string // for private registryCredentials
-	Password      string // for private registryCredentials
-	ContainerName string // for generating secret label
-}
-
-// UpdateContainerRequest is the payload for PUT /service/container-instance/{name}
-type UpdateContainerRequest struct {
-	ContainerSpec UpdateContainerSpec `json:"containerSpec"`
-}
-
-// UpdateContainerSpec holds the fields for updating a container.
-type UpdateContainerSpec struct {
-	RegistryType        string               `json:"registryType"`
-	TowerImage          string               `json:"towerImage,omitempty"`
-	Registry            string               `json:"registry,omitempty"`
-	ImageTag            string               `json:"imageTag,omitempty"`
-	RegistryCredentials *RegistryCredentials  `json:"registryCredentials,omitempty"`
-}
-
-// RegistryCredentials holds inline credentials for private registries.
-type RegistryCredentials struct {
-	Username string `json:"username"`
-	Password string `json:"password"`
-	Label    string `json:"label"`
-}
-
-// UpdateContainerResponse is the response from the container update endpoint.
-type UpdateContainerResponse struct {
-	Success bool   `json:"success"`
-	Message string `json:"message,omitempty"`
-	Data    struct {
-		TaskID string `json:"taskId"`
-	} `json:"data"`
-	Error string `json:"error,omitempty"`
+	Type          string // "tower", "private"
+	FullImage     string // full reference incl. host (host/repo/app:tag) — sent as v1 `image`
+	Username      string // private only
+	Password      string // private only
+	ContainerName string // used to derive the saved-secret label
 }

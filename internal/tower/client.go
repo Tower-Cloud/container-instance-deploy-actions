@@ -10,6 +10,12 @@ import (
 )
 
 // Client handles communication with the Tower Cloud API gateway.
+//
+// Container endpoints under `/service/container-instance/...` are served by
+// the container-provisioning-service v1 API (mutations are async with 202 +
+// operation envelope; org is derived from the JWT, no X-Organization-ID
+// header). Login and registry-credentials endpoints are still on legacy
+// paths.
 type Client struct {
 	apiURL     string
 	httpClient *http.Client
@@ -25,7 +31,8 @@ func NewClient(apiURL string) *Client {
 	}
 }
 
-// Login authenticates with Tower Cloud and returns an access token.
+// Login authenticates with Tower Cloud and returns an access token. IAM
+// service — unchanged by the container-instance v1 migration.
 func (c *Client) Login(username, password, orgID string) (string, error) {
 	payload := LoginRequest{
 		Username:       username,
@@ -75,16 +82,27 @@ func (c *Client) Login(username, password, orgID string) (string, error) {
 	return loginResp.AccessToken, nil
 }
 
-// GetContainer checks if a container instance exists and returns its details.
-func (c *Client) GetContainer(token, orgID, containerName string) (*ContainerResponse, error) {
-	url := fmt.Sprintf("%s/service/container-instance/%s", c.apiURL, containerName)
+// containerPath returns the v1 public path for a single container resource.
+// The api-mgmt gateway maps `/service/container-instance/containers/...` to
+// the backend `/api/v1/containers/...` route, so callers never see `/v1` in
+// the URL.
+func (c *Client) containerPath(name string) string {
+	return fmt.Sprintf("%s/service/container-instance/containers/%s", c.apiURL, name)
+}
 
-	req, err := http.NewRequest("GET", url, nil)
+// GetContainer fetches the v1 detail view for an existing container. Returns
+// a friendly error if the container doesn't exist (the action only updates,
+// never creates).
+//
+// Note: v1 derives organization context from the JWT azp claim — no
+// X-Organization-ID header is sent (or accepted). The orgID parameter is
+// retained for symmetry with the legacy signature but unused.
+func (c *Client) GetContainer(token, _orgID, containerName string) (*V1Container, error) {
+	req, err := http.NewRequest("GET", c.containerPath(containerName), nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create get container request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("X-Organization-ID", orgID)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -110,23 +128,21 @@ func (c *Client) GetContainer(token, orgID, containerName string) (*ContainerRes
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("failed to get container instance (status %d): %s", resp.StatusCode, string(respBody))
+		return nil, parseV1Error(resp.StatusCode, respBody, "get container instance")
 	}
 
-	var containerResp ContainerResponse
+	var containerResp V1ContainerResponse
 	if err := json.Unmarshal(respBody, &containerResp); err != nil {
-		return nil, fmt.Errorf("failed to parse get container response: %w", err)
+		return nil, fmt.Errorf("failed to parse get container response: %w (body: %s)", err, string(respBody))
 	}
 
-	if !containerResp.Success {
-		return nil, fmt.Errorf("failed to get container instance: %s", containerResp.Error)
-	}
-
-	return &containerResp, nil
+	return &containerResp.Data.Container, nil
 }
 
-// GetRegistryCredentials fetches Tower registry credentials from the API gateway.
-func (c *Client) GetRegistryCredentials(token, orgID, tcrName string) (registryURL, username, password string, err error) {
+// GetRegistryCredentials fetches Tower registry credentials from the
+// container-registry service. Legacy envelope — not part of the v1
+// container-instance migration.
+func (c *Client) GetRegistryCredentials(token, _orgID, tcrName string) (registryURL, username, password string, err error) {
 	url := fmt.Sprintf("%s/service/container-registry/credentials/%s", c.apiURL, tcrName)
 
 	req, err := http.NewRequest("GET", url, nil)
@@ -134,7 +150,6 @@ func (c *Client) GetRegistryCredentials(token, orgID, tcrName string) (registryU
 		return "", "", "", fmt.Errorf("failed to create registry credentials request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("X-Organization-ID", orgID)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -174,66 +189,129 @@ func (c *Client) GetRegistryCredentials(token, orgID, tcrName string) (registryU
 	return credsResp.Data.RegistryURL, credsResp.Data.Username, credsResp.Data.Password, nil
 }
 
-// UpdateContainer updates an existing container instance with a new image.
-// Builds the correct API payload based on the registry config type.
-func (c *Client) UpdateContainer(token, orgID, containerName string, regCfg RegistryConfig) (string, error) {
-	url := fmt.Sprintf("%s/service/container-instance/%s", c.apiURL, containerName)
+// secretLabelFor returns the saved-credential label this action uses across
+// deploys of a given container. Stable per container so subsequent deploys
+// can reference the same saved secret via `credentialsLabel`.
+func secretLabelFor(containerName string) string {
+	return containerName + "-registry-secret"
+}
 
-	spec := UpdateContainerSpec{
-		RegistryType: regCfg.Type,
-	}
+// PatchContainerImage updates the image on an existing container via the v1
+// atomic PATCH endpoint. Returns the operation id from the 202 envelope.
+//
+// Registry-handling matrix:
+//   - Tower (regCfg.Type == "tower"): body is just `{"image": "<full URL>"}`.
+//     v1 detects the Tower glob (*.cr.tower.cloud) and routes through the
+//     org-level pull secret. No credentials are sent.
+//   - Private external: first attempt sends inline `credentials` with a
+//     stable per-container label so v1 saves the secret for reuse. If that
+//     attempt 409s with REGISTRY_SECRET_LABEL_TAKEN — i.e. a prior deploy
+//     already saved this secret — we retry with `credentialsLabel` only,
+//     referencing the existing saved secret. This keeps the action
+//     idempotent across redeploys without orphaning secrets.
+func (c *Client) PatchContainerImage(token, _orgID, containerName string, regCfg RegistryConfig) (string, error) {
+	url := c.containerPath(containerName) + "/image"
 
 	switch regCfg.Type {
 	case "tower":
-		spec.TowerImage = regCfg.FullImage
+		return c.patchImage(url, token, V1PatchImageRequest{Image: regCfg.FullImage})
 	case "private":
-		spec.Registry = regCfg.RegistryURL
-		spec.ImageTag = regCfg.ImageTag
-		spec.RegistryCredentials = &RegistryCredentials{
-			Username: regCfg.Username,
-			Password: regCfg.Password,
-			Label:    regCfg.ContainerName + "-registry-secret",
+		label := secretLabelFor(regCfg.ContainerName)
+		taskID, err := c.patchImage(url, token, V1PatchImageRequest{
+			Image: regCfg.FullImage,
+			Credentials: &V1Credentials{
+				Username: regCfg.Username,
+				Password: regCfg.Password,
+				Label:    label,
+			},
+		})
+		if err == nil {
+			return taskID, nil
 		}
+		// On the first redeploy the saved secret already exists. Retry
+		// referencing it by label so the deploy continues without
+		// double-storing credentials.
+		if isLabelTaken(err) {
+			return c.patchImage(url, token, V1PatchImageRequest{
+				Image:            regCfg.FullImage,
+				CredentialsLabel: label,
+			})
+		}
+		return "", err
+	default:
+		return "", fmt.Errorf("unsupported registry type %q (expected \"tower\" or \"private\")", regCfg.Type)
 	}
+}
 
-	payload := UpdateContainerRequest{ContainerSpec: spec}
-
+// patchImage performs a single PATCH attempt and decodes the v1 envelope.
+// 200 and 202 are both treated as success — the controller normally returns
+// 202 (async) but we accept 200 defensively.
+func (c *Client) patchImage(url, token string, payload V1PatchImageRequest) (string, error) {
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return "", fmt.Errorf("failed to marshal update request: %w", err)
+		return "", fmt.Errorf("failed to marshal patch image request: %w", err)
 	}
 
-	req, err := http.NewRequest("PUT", url, bytes.NewReader(body))
+	req, err := http.NewRequest("PATCH", url, bytes.NewReader(body))
 	if err != nil {
-		return "", fmt.Errorf("failed to create update request: %w", err)
+		return "", fmt.Errorf("failed to create patch image request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("X-Organization-ID", orgID)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("update container request failed: %w", err)
+		return "", fmt.Errorf("patch image request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", fmt.Errorf("failed to read update response: %w", err)
+		return "", fmt.Errorf("failed to read patch image response: %w", err)
 	}
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
-		return "", fmt.Errorf("update container failed (status %d): %s", resp.StatusCode, string(respBody))
+		return "", parseV1Error(resp.StatusCode, respBody, "update container image")
 	}
 
-	var updateResp UpdateContainerResponse
-	if err := json.Unmarshal(respBody, &updateResp); err != nil {
-		return "", fmt.Errorf("failed to parse update response: %w", err)
+	var opResp V1OperationResponse
+	if err := json.Unmarshal(respBody, &opResp); err != nil {
+		return "", fmt.Errorf("failed to parse patch image response: %w (body: %s)", err, string(respBody))
 	}
-
-	if !updateResp.Success {
-		return "", fmt.Errorf("update container failed: %s", updateResp.Error)
+	if opResp.Data.Operation.ID == "" {
+		return "", fmt.Errorf("patch image succeeded but no operation id was returned (body: %s)", string(respBody))
 	}
+	return opResp.Data.Operation.ID, nil
+}
 
-	return updateResp.Data.TaskID, nil
+// v1HTTPError carries the v1 error code so callers can branch on it.
+type v1HTTPError struct {
+	Status  int
+	Code    string
+	Message string
+}
+
+func (e *v1HTTPError) Error() string {
+	if e.Code != "" {
+		return fmt.Sprintf("%s (%s, status %d)", e.Message, e.Code, e.Status)
+	}
+	return fmt.Sprintf("%s (status %d)", e.Message, e.Status)
+}
+
+// parseV1Error decodes a v1 error envelope into a friendly error. Falls back
+// to the raw body when the response is not in v1 shape (e.g. gateway 502).
+func parseV1Error(status int, body []byte, action string) error {
+	var env V1ErrorEnvelope
+	if err := json.Unmarshal(body, &env); err == nil && env.Error != nil {
+		return &v1HTTPError{Status: status, Code: env.Error.Code, Message: fmt.Sprintf("failed to %s: %s", action, env.Error.Message)}
+	}
+	return fmt.Errorf("failed to %s (status %d): %s", action, status, string(body))
+}
+
+// isLabelTaken reports whether a PATCH failure is the registry-secret-label
+// collision case — i.e. a previous deploy already saved this secret and the
+// caller can safely retry with `credentialsLabel`.
+func isLabelTaken(err error) bool {
+	v1err, ok := err.(*v1HTTPError)
+	return ok && v1err.Code == "REGISTRY_SECRET_LABEL_TAKEN"
 }
