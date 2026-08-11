@@ -124,6 +124,7 @@ func run() error {
 		regCfg = tower.RegistryConfig{
 			Type:          "private",
 			FullImage:     fmt.Sprintf("%s/%s/%s:%s", registryURL, repoName, containerName, shortSHA),
+			Registry:      registryURL,
 			Username:      regUser,
 			Password:      regPass,
 			ContainerName: cfg.ContainerName,

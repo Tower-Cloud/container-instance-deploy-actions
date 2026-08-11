@@ -142,6 +142,7 @@ type RegistryCredentialsResponse struct {
 type RegistryConfig struct {
 	Type          string // "tower", "private"
 	FullImage     string // full reference incl. host (host/repo/app:tag) — sent as v1 `image`
+	Registry      string // private only registry host, used for secret-label scoping
 	Username      string // private only
 	Password      string // private only
 	ContainerName string // used to derive the saved-secret label

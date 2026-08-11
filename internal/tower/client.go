@@ -2,10 +2,13 @@ package tower
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -189,11 +192,53 @@ func (c *Client) GetRegistryCredentials(token, _orgID, tcrName string) (registry
 	return credsResp.Data.RegistryURL, credsResp.Data.Username, credsResp.Data.Password, nil
 }
 
+const maxRegistrySecretLabelLength = 200
+
 // secretLabelFor returns the saved-credential label this action uses across
-// deploys of a given container. Stable per container so the backend can upsert
-// the same Kubernetes pull secret on each deploy instead of creating a new one.
-func secretLabelFor(containerName string) string {
-	return containerName + "-registry-secret"
+// deploys of a given container+registry pair. Scoping the label by registry
+// avoids reusing the same Kubernetes Secret when a workflow moves a container
+// from one external registry to another.
+func secretLabelFor(containerName, registry string) string {
+	containerPart := sanitizeLabelPart(containerName)
+	if containerPart == "" {
+		containerPart = "container"
+	}
+	registryPart := sanitizeLabelPart(registry)
+	if registryPart == "" {
+		registryPart = "registry"
+	}
+
+	label := fmt.Sprintf("%s-%s-registry-secret", containerPart, registryPart)
+	if len(label) <= maxRegistrySecretLabelLength {
+		return label
+	}
+
+	sum := sha256.Sum256([]byte(label))
+	suffix := hex.EncodeToString(sum[:])[:12]
+	prefixLen := maxRegistrySecretLabelLength - len(suffix) - 1
+	prefix := strings.Trim(label[:prefixLen], "-")
+	if prefix == "" {
+		return suffix
+	}
+	return prefix + "-" + suffix
+}
+
+func sanitizeLabelPart(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	var b strings.Builder
+	lastDash := false
+	for _, r := range value {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+			lastDash = false
+			continue
+		}
+		if !lastDash {
+			b.WriteByte('-')
+			lastDash = true
+		}
+	}
+	return strings.Trim(b.String(), "-")
 }
 
 // PatchContainerImage updates the image on an existing container via the v1
@@ -203,8 +248,8 @@ func secretLabelFor(containerName string) string {
 //   - Tower (regCfg.Type == "tower"): body is just `{"image": "<full URL>"}`.
 //     v1 detects the Tower glob (*.cr.tower.cloud) and routes through the
 //     org-level pull secret. No credentials are sent.
-//   - Private external: first attempt sends inline `credentials` with a
-//     stable per-container label. The v1 backend owns idempotency by upserting
+//   - Private external: sends inline `credentials` with a stable label scoped
+//     to this container+registry. The v1 backend owns idempotency by upserting
 //     that saved secret on each deploy. The action deliberately does not fall
 //     back to `credentialsLabel`, because that can reuse stale or truncated
 //     credentials even when the workflow supplied fresh registry secrets.
@@ -215,7 +260,7 @@ func (c *Client) PatchContainerImage(token, _orgID, containerName string, regCfg
 	case "tower":
 		return c.patchImage(url, token, V1PatchImageRequest{Image: regCfg.FullImage})
 	case "private":
-		label := secretLabelFor(regCfg.ContainerName)
+		label := secretLabelFor(regCfg.ContainerName, regCfg.Registry)
 		return c.patchImage(url, token, V1PatchImageRequest{
 			Image: regCfg.FullImage,
 			Credentials: &V1Credentials{
@@ -379,7 +424,26 @@ func (e *v1HTTPError) Error() string {
 func parseV1Error(status int, body []byte, action string) error {
 	var env V1ErrorEnvelope
 	if err := json.Unmarshal(body, &env); err == nil && env.Error != nil {
-		return &v1HTTPError{Status: status, Code: env.Error.Code, Message: fmt.Sprintf("failed to %s: %s", action, env.Error.Message)}
+		message := fmt.Sprintf("failed to %s: %s", action, env.Error.Message)
+		if guidance := registrySecretGuidance(env.Error.Code, env.Error.Message); guidance != "" {
+			message += "\n\n" + guidance
+		}
+		return &v1HTTPError{Status: status, Code: env.Error.Code, Message: message}
 	}
 	return fmt.Errorf("failed to %s (status %d): %s", action, status, string(body))
+}
+
+func registrySecretGuidance(code, message string) string {
+	switch code {
+	case "REGISTRY_SECRET_LABEL_TAKEN":
+		return "The deploy action sends fresh inline registry credentials and expects the container service PATCH /image route to refresh an existing saved secret. Deploy the container-provisioning-service registry-secret refresh fix first, then rerun this workflow."
+	case "REGISTRY_SECRET_LABEL_NOT_FOUND":
+		return "The backend could not find the referenced saved registry secret. This action does not send credentialsLabel for private external registries, so check that the gateway is routed to the current container service build."
+	}
+
+	lower := strings.ToLower(message)
+	if strings.Contains(lower, "different registry") || strings.Contains(lower, "label may already be in use") {
+		return "The saved registry label appears to belong to another registry or an unmanaged secret. This action scopes new labels by container and registry; rerun after the updated action and container service are deployed, or clean up the conflicting saved secret intentionally."
+	}
+	return ""
 }
