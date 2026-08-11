@@ -124,7 +124,7 @@ jobs:
 5. **Builds** your Docker image for `linux/amd64`
 6. **Pushes** the image to the registry
 7. **Re-authenticates** (handles token expiry during long builds)
-8. **Updates** the container image via the Tower Cloud v1 API — `PATCH /service/container-instance/containers/{name}/image`. The call returns an operation id (`taskId` output) immediately; the rollout itself runs asynchronously on the Tower side. For private external registries, the first deploy saves a per-container pull secret; subsequent deploys reference it by label automatically.
+8. **Updates** the container image via the Tower Cloud v1 API — `PATCH /service/container-instance/containers/{name}/image`, then polls `GET /service/container-instance/operations/{taskId}` until the rollout succeeds or fails. For private external registries, each deploy sends the workflow-provided credentials with a stable per-container label so the backend can refresh the pull secret.
 
 ## Inputs
 
@@ -162,7 +162,7 @@ jobs:
 
 | Output | Description |
 |--------|-------------|
-| `taskId` | Operation id returned by the v1 API. Poll `GET /service/container-instance/operations/{taskId}` to track rollout. |
+| `taskId` | Operation id returned by the v1 API. The action polls this operation before exiting; use `GET /service/container-instance/operations/{taskId}` for later inspection. |
 | `imageUrl` | Full image URL that was built and pushed |
 
 ## Image Tagging

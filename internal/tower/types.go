@@ -98,12 +98,20 @@ type V1PatchImageRequest struct {
 // response. The `ID` field is what callers poll on at
 // GET /service/container-instance/operations/{id}.
 type V1Operation struct {
-	ID        string `json:"id"`
-	Type      string `json:"type"`
-	Status    string `json:"status"`
-	Container string `json:"container"`
-	Message   string `json:"message"`
-	CreatedAt string `json:"createdAt"`
+	ID          string            `json:"id"`
+	Type        string            `json:"type"`
+	Status      string            `json:"status"`
+	Container   string            `json:"container"`
+	Message     string            `json:"message"`
+	CreatedAt   string            `json:"createdAt"`
+	UpdatedAt   string            `json:"updatedAt,omitempty"`
+	CompletedAt string            `json:"completedAt,omitempty"`
+	Error       *V1OperationError `json:"error,omitempty"`
+}
+
+type V1OperationError struct {
+	Code    string `json:"code,omitempty"`
+	Message string `json:"message,omitempty"`
 }
 
 // V1OperationResponse is the 202-Accepted body returned by every mutating v1

@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/tower-cloud/container-instance-deploy-actions/internal/docker"
 	"github.com/tower-cloud/container-instance-deploy-actions/internal/tower"
@@ -177,6 +178,11 @@ func run() error {
 		return fmt.Errorf("failed to update container instance: %w", err)
 	}
 	fmt.Printf("Container update accepted (operation id: %s)\n", taskID)
+	fmt.Println("Waiting for container update to finish...")
+	if err := client.WaitForOperation(token, cfg.OrganizationID, taskID, 15*time.Minute); err != nil {
+		return err
+	}
+	fmt.Println("Container update completed successfully")
 	endGroup()
 
 	setOutput("taskId", taskID)
@@ -199,7 +205,7 @@ type config struct {
 	ContainerName    string
 	TCRName          string // Tower registry name (if tower)
 	RegistryURL      string // External registry URL
-	RegistryUsername  string // External registry username
+	RegistryUsername string // External registry username
 	RegistryPassword string // External registry password
 	BuildArguments   string
 	RepoName         string
@@ -224,7 +230,7 @@ func readConfig() config {
 		ContainerName:    os.Getenv("INPUT_CONTAINER_NAME"),
 		TCRName:          os.Getenv("INPUT_TCR_NAME"),
 		RegistryURL:      os.Getenv("INPUT_REGISTRY_URL"),
-		RegistryUsername:  os.Getenv("INPUT_REGISTRY_USERNAME"),
+		RegistryUsername: os.Getenv("INPUT_REGISTRY_USERNAME"),
 		RegistryPassword: os.Getenv("INPUT_REGISTRY_PASSWORD"),
 		BuildArguments:   os.Getenv("INPUT_BUILD_ARGUMENTS"),
 		RepoName:         repoName,

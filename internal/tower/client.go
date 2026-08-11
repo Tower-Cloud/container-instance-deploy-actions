@@ -190,8 +190,8 @@ func (c *Client) GetRegistryCredentials(token, _orgID, tcrName string) (registry
 }
 
 // secretLabelFor returns the saved-credential label this action uses across
-// deploys of a given container. Stable per container so subsequent deploys
-// can reference the same saved secret via `credentialsLabel`.
+// deploys of a given container. Stable per container so the backend can upsert
+// the same Kubernetes pull secret on each deploy instead of creating a new one.
 func secretLabelFor(containerName string) string {
 	return containerName + "-registry-secret"
 }
@@ -204,11 +204,10 @@ func secretLabelFor(containerName string) string {
 //     v1 detects the Tower glob (*.cr.tower.cloud) and routes through the
 //     org-level pull secret. No credentials are sent.
 //   - Private external: first attempt sends inline `credentials` with a
-//     stable per-container label so v1 saves the secret for reuse. If that
-//     attempt 409s with REGISTRY_SECRET_LABEL_TAKEN — i.e. a prior deploy
-//     already saved this secret — we retry with `credentialsLabel` only,
-//     referencing the existing saved secret. This keeps the action
-//     idempotent across redeploys without orphaning secrets.
+//     stable per-container label. The v1 backend owns idempotency by upserting
+//     that saved secret on each deploy. The action deliberately does not fall
+//     back to `credentialsLabel`, because that can reuse stale or truncated
+//     credentials even when the workflow supplied fresh registry secrets.
 func (c *Client) PatchContainerImage(token, _orgID, containerName string, regCfg RegistryConfig) (string, error) {
 	url := c.containerPath(containerName) + "/image"
 
@@ -217,7 +216,7 @@ func (c *Client) PatchContainerImage(token, _orgID, containerName string, regCfg
 		return c.patchImage(url, token, V1PatchImageRequest{Image: regCfg.FullImage})
 	case "private":
 		label := secretLabelFor(regCfg.ContainerName)
-		taskID, err := c.patchImage(url, token, V1PatchImageRequest{
+		return c.patchImage(url, token, V1PatchImageRequest{
 			Image: regCfg.FullImage,
 			Credentials: &V1Credentials{
 				Username: regCfg.Username,
@@ -225,19 +224,6 @@ func (c *Client) PatchContainerImage(token, _orgID, containerName string, regCfg
 				Label:    label,
 			},
 		})
-		if err == nil {
-			return taskID, nil
-		}
-		// On the first redeploy the saved secret already exists. Retry
-		// referencing it by label so the deploy continues without
-		// double-storing credentials.
-		if isLabelTaken(err) {
-			return c.patchImage(url, token, V1PatchImageRequest{
-				Image:            regCfg.FullImage,
-				CredentialsLabel: label,
-			})
-		}
-		return "", err
 	default:
 		return "", fmt.Errorf("unsupported registry type %q (expected \"tower\" or \"private\")", regCfg.Type)
 	}
@@ -284,6 +270,96 @@ func (c *Client) patchImage(url, token string, payload V1PatchImageRequest) (str
 	return opResp.Data.Operation.ID, nil
 }
 
+func (c *Client) operationPath(operationID string) string {
+	return fmt.Sprintf("%s/service/container-instance/operations/%s", c.apiURL, operationID)
+}
+
+func (c *Client) GetOperation(token, _orgID, operationID string) (*V1Operation, error) {
+	req, err := http.NewRequest("GET", c.operationPath(operationID), nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create get operation request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("get operation request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read get operation response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, parseV1Error(resp.StatusCode, respBody, "get operation status")
+	}
+
+	var opResp V1OperationResponse
+	if err := json.Unmarshal(respBody, &opResp); err != nil {
+		return nil, fmt.Errorf("failed to parse get operation response: %w (body: %s)", err, string(respBody))
+	}
+	if opResp.Data.Operation.ID == "" {
+		return nil, fmt.Errorf("get operation succeeded but no operation was returned (body: %s)", string(respBody))
+	}
+	return &opResp.Data.Operation, nil
+}
+
+func (c *Client) WaitForOperation(token, orgID, operationID string, timeout time.Duration) error {
+	if operationID == "" {
+		return fmt.Errorf("operation id is required")
+	}
+
+	deadline := time.Now().Add(timeout)
+	lastStatus := ""
+
+	for {
+		op, err := c.GetOperation(token, orgID, operationID)
+		if err != nil {
+			return err
+		}
+
+		if op.Status != lastStatus {
+			if op.Message != "" {
+				fmt.Printf("Operation status: %s - %s\n", op.Status, op.Message)
+			} else {
+				fmt.Printf("Operation status: %s\n", op.Status)
+			}
+			lastStatus = op.Status
+		}
+
+		switch op.Status {
+		case "succeeded":
+			return nil
+		case "failed":
+			return operationFailureError(op)
+		}
+
+		if time.Now().After(deadline) {
+			return fmt.Errorf("timed out waiting for container update operation %s (last status: %s)", operationID, op.Status)
+		}
+		time.Sleep(5 * time.Second)
+	}
+}
+
+func operationFailureError(op *V1Operation) error {
+	if op.Error != nil {
+		switch {
+		case op.Error.Code != "" && op.Error.Message != "":
+			return fmt.Errorf("container update operation failed (%s): %s", op.Error.Code, op.Error.Message)
+		case op.Error.Message != "":
+			return fmt.Errorf("container update operation failed: %s", op.Error.Message)
+		case op.Error.Code != "":
+			return fmt.Errorf("container update operation failed (%s)", op.Error.Code)
+		}
+	}
+	if op.Message != "" {
+		return fmt.Errorf("container update operation failed: %s", op.Message)
+	}
+	return fmt.Errorf("container update operation failed")
+}
+
 // v1HTTPError carries the v1 error code so callers can branch on it.
 type v1HTTPError struct {
 	Status  int
@@ -306,12 +382,4 @@ func parseV1Error(status int, body []byte, action string) error {
 		return &v1HTTPError{Status: status, Code: env.Error.Code, Message: fmt.Sprintf("failed to %s: %s", action, env.Error.Message)}
 	}
 	return fmt.Errorf("failed to %s (status %d): %s", action, status, string(body))
-}
-
-// isLabelTaken reports whether a PATCH failure is the registry-secret-label
-// collision case — i.e. a previous deploy already saved this secret and the
-// caller can safely retry with `credentialsLabel`.
-func isLabelTaken(err error) bool {
-	v1err, ok := err.(*v1HTTPError)
-	return ok && v1err.Code == "REGISTRY_SECRET_LABEL_TAKEN"
 }
