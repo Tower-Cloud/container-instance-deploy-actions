@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 )
 
 // Login authenticates with a Docker registry using --password-stdin.
@@ -52,9 +53,45 @@ func Login(registryURL, username, password string) error {
 	return nil
 }
 
-// Build builds a Docker image for linux/amd64 (Tower Cloud cluster architecture).
-func Build(imageURL, dockerfilePath, context string, buildArgs []string) error {
-	args := []string{"build", "--platform", "linux/amd64", "-t", imageURL, "-f", dockerfilePath}
+// ImageExists checks whether a tag already exists in the remote registry.
+// Uses `docker buildx imagetools inspect` which is a cheap manifest HEAD.
+// Returns (true, nil) if present, (false, nil) if not, or (false, err) on unexpected failure.
+func ImageExists(imageURL string) (bool, error) {
+	cmd := exec.Command("docker", "buildx", "imagetools", "inspect", imageURL)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		lower := strings.ToLower(stderr.String())
+		if strings.Contains(lower, "not found") || strings.Contains(lower, "manifest unknown") || strings.Contains(lower, "no such manifest") {
+			return false, nil
+		}
+		return false, nil
+	}
+	return true, nil
+}
+
+// BuildAndPush builds a linux/amd64 image with buildx and streams it to the
+// registry in one step, using registry-based layer cache and zstd compression.
+// Retries up to 3 times on transient network failures — our public ingress
+// bandwidth is narrow and variable, so stalled streams are expected occasionally.
+func BuildAndPush(imageURL, cacheRef, dockerfilePath, context string, buildArgs []string) error {
+	args := []string{
+		"buildx", "build",
+		"--platform", "linux/amd64",
+		"-t", imageURL,
+		"-f", dockerfilePath,
+		"--push",
+		"--provenance=false",
+		"--sbom=false",
+		"--output", "type=image,compression=zstd,compression-level=3,force-compression=true",
+	}
+
+	if cacheRef != "" {
+		args = append(args,
+			"--cache-from", "type=registry,ref="+cacheRef,
+			"--cache-to", "type=registry,ref="+cacheRef+",mode=max,compression=zstd",
+		)
+	}
 
 	for _, arg := range buildArgs {
 		arg = strings.TrimSpace(arg)
@@ -65,38 +102,41 @@ func Build(imageURL, dockerfilePath, context string, buildArgs []string) error {
 
 	args = append(args, context)
 
-	cmd := exec.Command("docker", args...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	// BUILDKIT_MAX_PARALLELISM=2 — on a ~0.5-1 MB/s public pipe, 2 concurrent
+	// streams is the sweet spot. More streams fight for bandwidth and starve
+	// each other (observed: one stream collapses to ~0.18 MB/s while others run).
+	env := append(os.Environ(), "BUILDKIT_MAX_PARALLELISM=2")
 
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("docker build failed: %w", err)
-	}
-	return nil
-}
+	var lastErr error
+	for attempt := 1; attempt <= 3; attempt++ {
+		cmd := exec.Command("docker", args...)
+		cmd.Env = env
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
 
-// Push pushes a Docker image to the registry.
-func Push(imageURL string) error {
-	cmd := exec.Command("docker", "push", imageURL)
-
-	var stderr bytes.Buffer
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		errMsg := stderr.String()
-		lower := strings.ToLower(errMsg)
-
-		switch {
-		case strings.Contains(lower, "denied") || strings.Contains(lower, "unauthorized"):
-			return fmt.Errorf(
-				"permission denied pushing to registry\n\n"+
-					"Your credentials may not have push access.\n"+
-					"Verify that the provided credentials have write/push permissions",
-			)
-		default:
-			return fmt.Errorf("docker push failed: %s", errMsg)
+		if attempt > 1 {
+			fmt.Printf("Retrying build+push (attempt %d/3)...\n", attempt)
 		}
+
+		if err := cmd.Run(); err != nil {
+			lastErr = err
+			lower := strings.ToLower(err.Error())
+			// Retry on transient failures only.
+			if strings.Contains(lower, "denied") || strings.Contains(lower, "unauthorized") {
+				return fmt.Errorf(
+					"permission denied pushing to registry\n\n"+
+						"Your credentials may not have push access.\n"+
+						"Verify that the provided credentials have write/push permissions",
+				)
+			}
+			// Backoff: 5s, 15s
+			if attempt < 3 {
+				time.Sleep(time.Duration(attempt*10+5) * time.Second / 2)
+				continue
+			}
+			return fmt.Errorf("docker buildx build --push failed after %d attempts: %w", attempt, err)
+		}
+		return nil
 	}
-	return nil
+	return lastErr
 }

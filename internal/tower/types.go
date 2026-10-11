@@ -1,7 +1,6 @@
 package tower
 
-// LoginRequest is the payload for POST /public?action=login (IAM service —
-// unchanged by the container-instance v1 migration).
+// LoginRequest is the payload for POST /v1/auth/api/token
 type LoginRequest struct {
 	Username       string `json:"username"`
 	Password       string `json:"password"`
@@ -16,7 +15,7 @@ type LoginResponse struct {
 }
 
 // APIError — legacy/IAM error response format ({error: {code, message}} OR
-// just {error: "..."}). Kept for the login path which is not on v1 yet.
+// just {error: "..."}).
 type APIError struct {
 	Error struct {
 		Message string `json:"message"`
@@ -27,7 +26,7 @@ type APIError struct {
 // ---------------------------------------------------------------------------
 // v1 envelopes — every container-instance v1 endpoint returns either
 // `{"data": ...}` on success or `{"error": {"code", "message", "details",
-// "requestId"}}` on failure. The IAM/registry endpoints still use the legacy
+// "requestId"}}` on failure. The registry endpoints still use the legacy
 // shapes above.
 // ---------------------------------------------------------------------------
 

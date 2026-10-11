@@ -46,7 +46,11 @@ func run() error {
 		return fmt.Errorf("TOWER_API_URL is not configured — contact Tower Cloud support")
 	}
 
-	client := tower.NewClient(apiURL)
+	authURL := os.Getenv("TOWER_AUTH_MGMT_URL")
+	if authURL == "" {
+		return fmt.Errorf("auth_url is required for scoped API login")
+	}
+	client := tower.NewClient(apiURL, authURL)
 
 	token, err := client.Login(cfg.TowerUser, cfg.TowerPassword, cfg.OrganizationID)
 	if err != nil {
@@ -131,7 +135,12 @@ func run() error {
 
 	fullImageURL := regCfg.FullImage
 
+	// Cache ref: shared "buildcache" tag lets buildx reuse layers across runs.
+	// Scoped per container so unrelated services don't pollute each other's cache.
+	cacheRef := fmt.Sprintf("%s/%s/%s:buildcache", registryURL, repoName, containerName)
+
 	fmt.Printf("Image: %s\n", fullImageURL)
+	fmt.Printf("Cache: %s\n", cacheRef)
 
 	// ── Step 4: Docker Login ──
 	group("Docker login")
@@ -141,26 +150,29 @@ func run() error {
 	fmt.Printf("Logged into %s\n", registryURL)
 	endGroup()
 
-	// ── Step 5: Build Image (linux/amd64) ──
-	group("Build container image")
-	dockerfilePath := filepath.Join(cfg.AppSourcePath, cfg.DockerfilePath)
-	buildArgs := parseBuildArgs(cfg.BuildArguments)
+	// ── Step 5: Skip if this exact SHA is already in the registry ──
+	// Cheap manifest HEAD — if the commit already has an image pushed, we can
+	// go straight to "update container" without re-building or re-pushing.
+	group("Check for existing image")
+	if exists, _ := docker.ImageExists(fullImageURL); exists {
+		fmt.Printf("Image %s already exists in registry — skipping build + push\n", fullImageURL)
+		endGroup()
+	} else {
+		fmt.Printf("Image not found in registry — proceeding with build + push\n")
+		endGroup()
 
-	fmt.Printf("Building image: %s (platform: linux/amd64)\n", fullImageURL)
-	if err := docker.Build(fullImageURL, dockerfilePath, cfg.AppSourcePath, buildArgs); err != nil {
-		return err
-	}
-	fmt.Println("Image built successfully")
-	endGroup()
+		// ── Step 6: Build + Push in one streaming buildx call ──
+		group("Build & push container image")
+		dockerfilePath := filepath.Join(cfg.AppSourcePath, cfg.DockerfilePath)
+		buildArgs := parseBuildArgs(cfg.BuildArguments)
 
-	// ── Step 6: Push Image ──
-	group("Push container image")
-	fmt.Printf("Pushing image: %s\n", fullImageURL)
-	if err := docker.Push(fullImageURL); err != nil {
-		return err
+		fmt.Printf("Building and pushing image: %s (platform: linux/amd64, compression: zstd)\n", fullImageURL)
+		if err := docker.BuildAndPush(fullImageURL, cacheRef, dockerfilePath, cfg.AppSourcePath, buildArgs); err != nil {
+			return err
+		}
+		fmt.Println("Image built and pushed successfully")
+		endGroup()
 	}
-	fmt.Println("Image pushed successfully")
-	endGroup()
 
 	// ── Step 7: Re-authenticate + Update Container Instance ──
 	group("Update container instance")
@@ -199,7 +211,7 @@ type config struct {
 	ContainerName    string
 	TCRName          string // Tower registry name (if tower)
 	RegistryURL      string // External registry URL
-	RegistryUsername  string // External registry username
+	RegistryUsername string // External registry username
 	RegistryPassword string // External registry password
 	BuildArguments   string
 	RepoName         string
@@ -224,7 +236,7 @@ func readConfig() config {
 		ContainerName:    os.Getenv("INPUT_CONTAINER_NAME"),
 		TCRName:          os.Getenv("INPUT_TCR_NAME"),
 		RegistryURL:      os.Getenv("INPUT_REGISTRY_URL"),
-		RegistryUsername:  os.Getenv("INPUT_REGISTRY_USERNAME"),
+		RegistryUsername: os.Getenv("INPUT_REGISTRY_USERNAME"),
 		RegistryPassword: os.Getenv("INPUT_REGISTRY_PASSWORD"),
 		BuildArguments:   os.Getenv("INPUT_BUILD_ARGUMENTS"),
 		RepoName:         repoName,

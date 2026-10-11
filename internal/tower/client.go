@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 )
 
@@ -14,26 +16,32 @@ import (
 // Container endpoints under `/service/container-instance/...` are served by
 // the container-provisioning-service v1 API (mutations are async with 202 +
 // operation envelope; org is derived from the JWT, no X-Organization-ID
-// header). Login and registry-credentials endpoints are still on legacy
-// paths.
+// header). Login uses Auth Management; registry credentials retain their
+// existing endpoint.
 type Client struct {
 	apiURL     string
+	authURL    string
 	httpClient *http.Client
 }
 
 // NewClient creates a new Tower API client.
-func NewClient(apiURL string) *Client {
+func NewClient(apiURL, authURL string) *Client {
 	return &Client{
-		apiURL: apiURL,
+		apiURL:  strings.TrimRight(apiURL, "/"),
+		authURL: strings.TrimRight(authURL, "/"),
 		httpClient: &http.Client{
-			Timeout: 30 * time.Second,
+			Timeout:       30 * time.Second,
+			CheckRedirect: func(req *http.Request, via []*http.Request) error { return http.ErrUseLastResponse },
 		},
 	}
 }
 
-// Login authenticates with Tower Cloud and returns an access token. IAM
-// service — unchanged by the container-instance v1 migration.
+// Login exchanges credentials and organization ID for a scoped API token.
 func (c *Client) Login(username, password, orgID string) (string, error) {
+	authEndpoint, err := url.Parse(c.authURL)
+	if err != nil || authEndpoint.Scheme != "https" || authEndpoint.Host == "" || authEndpoint.User != nil || authEndpoint.RawQuery != "" || authEndpoint.Fragment != "" {
+		return "", fmt.Errorf("auth_url must be an HTTPS Auth Management base URL")
+	}
 	payload := LoginRequest{
 		Username:       username,
 		Password:       password,
@@ -45,7 +53,7 @@ func (c *Client) Login(username, password, orgID string) (string, error) {
 		return "", fmt.Errorf("failed to marshal login request: %w", err)
 	}
 
-	req, err := http.NewRequest("POST", c.apiURL+"/public?action=login", bytes.NewReader(body))
+	req, err := http.NewRequest("POST", c.authURL+"/v1/auth/api/token", bytes.NewReader(body))
 	if err != nil {
 		return "", fmt.Errorf("failed to create login request: %w", err)
 	}
@@ -57,17 +65,13 @@ func (c *Client) Login(username, password, orgID string) (string, error) {
 	}
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return "", fmt.Errorf("failed to read login response: %w", err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		var apiErr APIError
-		if err := json.Unmarshal(respBody, &apiErr); err == nil && apiErr.Error.Message != "" {
-			return "", fmt.Errorf("login failed (%s): %s", apiErr.Error.Code, apiErr.Error.Message)
-		}
-		return "", fmt.Errorf("login failed with status %d: %s", resp.StatusCode, string(respBody))
+		return "", fmt.Errorf("Auth Management login failed with HTTP %d", resp.StatusCode)
 	}
 
 	var loginResp LoginResponse
@@ -76,7 +80,7 @@ func (c *Client) Login(username, password, orgID string) (string, error) {
 	}
 
 	if loginResp.AccessToken == "" {
-		return "", fmt.Errorf("login succeeded but no access token returned (response: %s)", string(respBody))
+		return "", fmt.Errorf("Auth Management did not return an access token")
 	}
 
 	return loginResp.AccessToken, nil
@@ -94,7 +98,7 @@ func (c *Client) containerPath(name string) string {
 // a friendly error if the container doesn't exist (the action only updates,
 // never creates).
 //
-// Note: v1 derives organization context from the JWT azp claim — no
+// Note: v1 derives organization context from the signed JWT organization claim — no
 // X-Organization-ID header is sent (or accepted). The orgID parameter is
 // retained for symmetry with the legacy signature but unused.
 func (c *Client) GetContainer(token, _orgID, containerName string) (*V1Container, error) {
@@ -142,7 +146,7 @@ func (c *Client) GetContainer(token, _orgID, containerName string) (*V1Container
 // GetRegistryCredentials fetches Tower registry credentials from the
 // container-registry service. Legacy envelope — not part of the v1
 // container-instance migration.
-func (c *Client) GetRegistryCredentials(token, _orgID, tcrName string) (registryURL, username, password string, err error) {
+func (c *Client) GetRegistryCredentials(token, orgID, tcrName string) (registryURL, username, password string, err error) {
 	url := fmt.Sprintf("%s/service/container-registry/credentials/%s", c.apiURL, tcrName)
 
 	req, err := http.NewRequest("GET", url, nil)
@@ -150,6 +154,7 @@ func (c *Client) GetRegistryCredentials(token, _orgID, tcrName string) (registry
 		return "", "", "", fmt.Errorf("failed to create registry credentials request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("X-Organization-ID", orgID)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
