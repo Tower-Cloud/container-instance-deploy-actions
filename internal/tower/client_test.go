@@ -65,3 +65,63 @@ func TestLoginDoesNotFollowRedirects(t *testing.T) {
 		t.Fatal("login redirect followed")
 	}
 }
+
+func TestScopedTokenWithV1ContainerAndRegistry(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/v1/auth/api/token" {
+			w.Write([]byte(`{"access_token":"scoped-api-token"}`))
+			return
+		}
+		if r.Header.Get("Authorization") != "Bearer scoped-api-token" {
+			t.Error("missing scoped token")
+		}
+		switch r.URL.Path {
+		case "/service/container-instance/containers/app":
+			if r.Method != "GET" {
+				t.Error("wrong container method")
+			}
+			w.Write([]byte(`{"data":{"container":{"name":"app","status":"running"}}}`))
+		case "/service/container-instance/containers/app/image":
+			if r.Method != "PATCH" {
+				t.Error("legacy update method")
+			}
+			var body V1PatchImageRequest
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Error(err)
+			}
+			if body.Image != "registry.example/app:sha" || body.Credentials != nil {
+				t.Error("wrong v1 image payload")
+			}
+			w.WriteHeader(http.StatusAccepted)
+			w.Write([]byte(`{"data":{"operation":{"id":"operation-1"}}}`))
+		case "/service/container-registry/credentials/registry":
+			if r.Header.Get("X-Organization-ID") != "org-a" {
+				t.Error("registry lost organization header")
+			}
+			w.Write([]byte(`{"success":true,"data":{"registryUrl":"registry.example","username":"u","password":"p"}}`))
+		default:
+			t.Errorf("unexpected route %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	client := NewClient(server.URL, server.URL)
+	client.httpClient = server.Client()
+	token, err := client.Login("u", "p", "org-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	container, err := client.GetContainer(token, "org-a", "app")
+	if err != nil || container.Name != "app" {
+		t.Fatalf("v1 detail: %v", err)
+	}
+	id, err := client.PatchContainerImage(token, "org-a", "app", RegistryConfig{Type: "tower", FullImage: "registry.example/app:sha"})
+	if err != nil || id != "operation-1" {
+		t.Fatalf("v1 operation: %v", err)
+	}
+	registry, _, _, err := client.GetRegistryCredentials(token, "org-a", "registry")
+	if err != nil || registry != "registry.example" {
+		t.Fatalf("registry credentials: %v", err)
+	}
+}

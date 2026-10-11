@@ -118,13 +118,13 @@ jobs:
 ## How It Works
 
 1. **Authenticates** with Tower Cloud
-2. **Verifies** the container instance exists and is updatable
+2. **Verifies** the container instance exists and is updatable (rejects `provisioning` / `pending` / `updating` / `failed` / `error`)
 3. **Resolves registry** — fetches Tower credentials or uses provided ones
 4. **Logs into** the registry
 5. **Builds** your Docker image for `linux/amd64`
 6. **Pushes** the image to the registry
 7. **Re-authenticates** (handles token expiry during long builds)
-8. **Updates** the container instance with the new image
+8. **Updates** the container image via the Tower Cloud v1 API — `PATCH /service/container-instance/containers/{name}/image`. The call returns an operation id (`taskId` output) immediately; the rollout itself runs asynchronously on the Tower side. For private external registries, the first deploy saves a per-container pull secret; subsequent deploys reference it by label automatically.
 
 ## Inputs
 
@@ -162,7 +162,7 @@ jobs:
 
 | Output | Description |
 |--------|-------------|
-| `taskId` | Deployment task ID returned by Tower Cloud |
+| `taskId` | Operation id returned by the v1 API. Poll `GET /service/container-instance/operations/{taskId}` to track rollout. |
 | `imageUrl` | Full image URL that was built and pushed |
 
 ## Image Tagging
@@ -193,11 +193,13 @@ Example: `my-registry.hyd.cr.tower.cloud/web-portal/my-app:a1b2c3d`
 | `registry authentication failed` | Wrong registry credentials | Verify `registry_username` / `registry_password` |
 | `cannot reach registry` | Registry URL incorrect or unreachable | Check URL for typos, no `https://` |
 | `invalid reference format` | Registry URL has `https://` or uppercase chars | Use hostname only, lowercase |
-| `container is provisioning/pending` | Previous deploy still in progress | Wait and retry |
-| `container is in failed state` | Container has terminal error | Resolve in Tower Cloud portal |
+| `container is provisioning/pending/updating` | Previous deploy still in progress | Wait and retry |
+| `container is in failed/error state` | Container has terminal error | Resolve in Tower Cloud portal |
+| `NO_EFFECTIVE_CHANGE` | Image reference matches what's already deployed (same commit SHA) | Push a new commit; rebuilds with a new SHA |
+| `OPERATION_IN_PROGRESS` | Another operation on this container started after preflight | Wait for it to finish and re-run |
 
 ### Scoped API authentication
 
-Set the required `auth_url` input to your environment's HTTPS Auth Management base URL (without `/v1/auth/api/token`). The action exchanges username/password plus `organization_id` at `/v1/auth/api/token`, and passes the returned scoped tower-api token with `X-Organization-ID` on resource requests. The old IAM `/public?action=login` endpoint is no longer used. Obtain the actual public Auth Management endpoint from your deployment configuration; do not use an internal Kubernetes address on a GitHub-hosted runner.
+Set the required `auth_url` input to your environment's HTTPS Auth Management base URL (without `/v1/auth/api/token`). The action exchanges username/password plus `organization_id` at `/v1/auth/api/token`, and passes the returned scoped tower-api token on container v1 requests and with `X-Organization-ID` on registry requests. The old IAM `/public?action=login` endpoint is no longer used. Obtain the actual public Auth Management endpoint from your deployment configuration; do not use an internal Kubernetes address on a GitHub-hosted runner.
 
 The action rejects plaintext login endpoints and redirects, masks the returned token, and does not log authentication response bodies. Receiving services verify the signed token, organization, active membership and operation permissions. The checked-in Linux amd64 executable is rebuilt with this change because `action.yml` executes it directly.
