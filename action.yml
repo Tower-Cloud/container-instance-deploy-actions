@@ -2,6 +2,9 @@ name: 'Tower Cloud Container Deploy'
 description: 'Build, push, and deploy a container image to Tower Cloud Container Instance'
 
 inputs:
+  auth_url:
+    description: 'HTTPS Auth Management base URL for this Tower environment'
+    required: true
   dockerfilePath:
     description: 'Dockerfile path relative to project root'
     required: false
@@ -64,6 +67,7 @@ runs:
       run: ${{ github.action_path }}/dist/tci-deploy
       env:
         TOWER_API_URL: 'https://api.dev.tower.cloud'
+        TOWER_AUTH_MGMT_URL: ${{ inputs.auth_url }}
         INPUT_APP_SOURCE_PATH: ${{ github.workspace }}
         INPUT_DOCKERFILE_PATH: ${{ inputs.dockerfilePath }}
         INPUT_TOWER_USER: ${{ inputs.tower_user }}

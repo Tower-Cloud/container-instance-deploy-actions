@@ -1,6 +1,6 @@
 package tower
 
-// LoginRequest is the payload for POST /public?action=login
+// LoginRequest is the payload for POST /v1/auth/api/token
 type LoginRequest struct {
 	Username       string `json:"username"`
 	Password       string `json:"password"`
@@ -75,7 +75,7 @@ type UpdateContainerSpec struct {
 	TowerImage          string               `json:"towerImage,omitempty"`
 	Registry            string               `json:"registry,omitempty"`
 	ImageTag            string               `json:"imageTag,omitempty"`
-	RegistryCredentials *RegistryCredentials  `json:"registryCredentials,omitempty"`
+	RegistryCredentials *RegistryCredentials `json:"registryCredentials,omitempty"`
 }
 
 // RegistryCredentials holds inline credentials for private registries.

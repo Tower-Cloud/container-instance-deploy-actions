@@ -46,7 +46,11 @@ func run() error {
 		return fmt.Errorf("TOWER_API_URL is not configured — contact Tower Cloud support")
 	}
 
-	client := tower.NewClient(apiURL)
+	authURL := os.Getenv("TOWER_AUTH_MGMT_URL")
+	if authURL == "" {
+		return fmt.Errorf("auth_url is required for scoped API login")
+	}
+	client := tower.NewClient(apiURL, authURL)
 
 	token, err := client.Login(cfg.TowerUser, cfg.TowerPassword, cfg.OrganizationID)
 	if err != nil {
@@ -214,7 +218,7 @@ type config struct {
 	ContainerName    string
 	TCRName          string // Tower registry name (if tower)
 	RegistryURL      string // External registry URL
-	RegistryUsername  string // External registry username
+	RegistryUsername string // External registry username
 	RegistryPassword string // External registry password
 	BuildArguments   string
 	RepoName         string
@@ -239,7 +243,7 @@ func readConfig() config {
 		ContainerName:    os.Getenv("INPUT_CONTAINER_NAME"),
 		TCRName:          os.Getenv("INPUT_TCR_NAME"),
 		RegistryURL:      os.Getenv("INPUT_REGISTRY_URL"),
-		RegistryUsername:  os.Getenv("INPUT_REGISTRY_USERNAME"),
+		RegistryUsername: os.Getenv("INPUT_REGISTRY_USERNAME"),
 		RegistryPassword: os.Getenv("INPUT_REGISTRY_PASSWORD"),
 		BuildArguments:   os.Getenv("INPUT_BUILD_ARGUMENTS"),
 		RepoName:         repoName,
