@@ -6,27 +6,36 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 )
 
 // Client handles communication with the Tower Cloud API gateway.
 type Client struct {
 	apiURL     string
+	authURL    string
 	httpClient *http.Client
 }
 
 // NewClient creates a new Tower API client.
-func NewClient(apiURL string) *Client {
+func NewClient(apiURL, authURL string) *Client {
 	return &Client{
-		apiURL: apiURL,
+		apiURL:  strings.TrimRight(apiURL, "/"),
+		authURL: strings.TrimRight(authURL, "/"),
 		httpClient: &http.Client{
-			Timeout: 30 * time.Second,
+			Timeout:       30 * time.Second,
+			CheckRedirect: func(req *http.Request, via []*http.Request) error { return http.ErrUseLastResponse },
 		},
 	}
 }
 
 // Login authenticates with Tower Cloud and returns an access token.
 func (c *Client) Login(username, password, orgID string) (string, error) {
+	authEndpoint, err := url.Parse(c.authURL)
+	if err != nil || authEndpoint.Scheme != "https" || authEndpoint.Host == "" || authEndpoint.User != nil || authEndpoint.RawQuery != "" || authEndpoint.Fragment != "" {
+		return "", fmt.Errorf("auth_url must be an HTTPS Auth Management base URL")
+	}
 	payload := LoginRequest{
 		Username:       username,
 		Password:       password,
@@ -38,7 +47,7 @@ func (c *Client) Login(username, password, orgID string) (string, error) {
 		return "", fmt.Errorf("failed to marshal login request: %w", err)
 	}
 
-	req, err := http.NewRequest("POST", c.apiURL+"/public?action=login", bytes.NewReader(body))
+	req, err := http.NewRequest("POST", c.authURL+"/v1/auth/api/token", bytes.NewReader(body))
 	if err != nil {
 		return "", fmt.Errorf("failed to create login request: %w", err)
 	}
@@ -50,17 +59,13 @@ func (c *Client) Login(username, password, orgID string) (string, error) {
 	}
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return "", fmt.Errorf("failed to read login response: %w", err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		var apiErr APIError
-		if err := json.Unmarshal(respBody, &apiErr); err == nil && apiErr.Error.Message != "" {
-			return "", fmt.Errorf("login failed (%s): %s", apiErr.Error.Code, apiErr.Error.Message)
-		}
-		return "", fmt.Errorf("login failed with status %d: %s", resp.StatusCode, string(respBody))
+		return "", fmt.Errorf("Auth Management login failed with HTTP %d", resp.StatusCode)
 	}
 
 	var loginResp LoginResponse
@@ -69,7 +74,7 @@ func (c *Client) Login(username, password, orgID string) (string, error) {
 	}
 
 	if loginResp.AccessToken == "" {
-		return "", fmt.Errorf("login succeeded but no access token returned (response: %s)", string(respBody))
+		return "", fmt.Errorf("Auth Management did not return an access token")
 	}
 
 	return loginResp.AccessToken, nil

@@ -195,3 +195,9 @@ Example: `my-registry.hyd.cr.tower.cloud/web-portal/my-app:a1b2c3d`
 | `invalid reference format` | Registry URL has `https://` or uppercase chars | Use hostname only, lowercase |
 | `container is provisioning/pending` | Previous deploy still in progress | Wait and retry |
 | `container is in failed state` | Container has terminal error | Resolve in Tower Cloud portal |
+
+### Scoped API authentication
+
+Set the required `auth_url` input to your environment's HTTPS Auth Management base URL (without `/v1/auth/api/token`). The action exchanges username/password plus `organization_id` at `/v1/auth/api/token`, and passes the returned scoped tower-api token with `X-Organization-ID` on resource requests. The old IAM `/public?action=login` endpoint is no longer used. Obtain the actual public Auth Management endpoint from your deployment configuration; do not use an internal Kubernetes address on a GitHub-hosted runner.
+
+The action rejects plaintext login endpoints and redirects, masks the returned token, and does not log authentication response bodies. Receiving services verify the signed token, organization, active membership and operation permissions. The checked-in Linux amd64 executable is rebuilt with this change because `action.yml` executes it directly.
