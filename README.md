@@ -198,8 +198,8 @@ Example: `my-registry.hyd.cr.tower.cloud/web-portal/my-app:a1b2c3d`
 | `NO_EFFECTIVE_CHANGE` | Image reference matches what's already deployed (same commit SHA) | Push a new commit; rebuilds with a new SHA |
 | `OPERATION_IN_PROGRESS` | Another operation on this container started after preflight | Wait for it to finish and re-run |
 
-### Scoped API authentication
+### API authentication
 
-Set the required `auth_url` input to your environment's HTTPS Auth Management base URL (without `/v1/auth/api/token`). The action exchanges username/password plus `organization_id` at `/v1/auth/api/token`, and passes the returned scoped tower-api token on container v1 requests and with `X-Organization-ID` on registry requests. The old IAM `/public?action=login` endpoint is no longer used. Obtain the actual public Auth Management endpoint from your deployment configuration; do not use an internal Kubernetes address on a GitHub-hosted runner.
+The action exchanges username/password plus `organization_id` through `TOWER_API_URL/public?action=login`, using the API gateway configured in `action.yml`. No separate `auth_url` input is required. The returned token is used for container v1 and registry requests.
 
-The action rejects plaintext login endpoints and redirects, masks the returned token, and does not log authentication response bodies. Receiving services verify the signed token, organization, active membership and operation permissions. The checked-in Linux amd64 executable is rebuilt with this change because `action.yml` executes it directly.
+Login requires HTTPS, rejects redirects, masks the returned token, and does not log authentication response bodies. The checked-in Linux amd64 executable is rebuilt with this change because `action.yml` executes it directly.

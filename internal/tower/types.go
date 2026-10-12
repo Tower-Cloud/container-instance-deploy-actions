@@ -1,6 +1,6 @@
 package tower
 
-// LoginRequest is the payload for POST /v1/auth/api/token
+// LoginRequest is the payload for POST /public?action=login
 type LoginRequest struct {
 	Username       string `json:"username"`
 	Password       string `json:"password"`

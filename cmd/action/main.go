@@ -46,11 +46,7 @@ func run() error {
 		return fmt.Errorf("TOWER_API_URL is not configured — contact Tower Cloud support")
 	}
 
-	authURL := os.Getenv("TOWER_AUTH_MGMT_URL")
-	if authURL == "" {
-		return fmt.Errorf("auth_url is required for scoped API login")
-	}
-	client := tower.NewClient(apiURL, authURL)
+	client := tower.NewClient(apiURL)
 
 	token, err := client.Login(cfg.TowerUser, cfg.TowerPassword, cfg.OrganizationID)
 	if err != nil {
